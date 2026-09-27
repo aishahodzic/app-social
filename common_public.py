@@ -743,6 +743,17 @@ class CommonPublicStore:
     except (OSError, ValueError, SyntaxError, Image.UnidentifiedImageError):
       return None
 
+  def _store_thumbnail(
+    self, post_id: str, index: int, original: bytes,
+    supplied: tuple[dict, bytes] | None,
+  ) -> None:
+    """Keep every thumbnail as WebP, the one type peers ask for by link."""
+    if supplied is not None and supplied[0]["mime"] == "image/webp":
+      atomic_write(self.board_thumbnail_dir() / f"{post_id}-{index}.webp", supplied[1])
+    else:
+      # Re-encode a small supplied thumbnail of another type, or make one.
+      self._write_board_thumbnail(post_id, index, supplied[1] if supplied else original)
+
   def _write_board_thumbnail(self, post_id: str, index: int, data: bytes) -> None:
     try:
       mime, thumbnail = image_thumbnail_bytes(data)
@@ -799,26 +810,16 @@ class CommonPublicStore:
         metas = []
         for index, (wire, data) in enumerate(attachments):
           atomic_write(self.board_media_index_path(post["id"], index, wire["mime"]), data)
-          if thumbnails and index < len(thumbnails):
-            thumb_wire, thumb_data = thumbnails[index]
-            target = self.board_thumbnail_dir() / (
-              f"{post['id']}-{index}.{ATTACHMENT_MIME_EXT[thumb_wire['mime']]}"
-            )
-            atomic_write(target, thumb_data)
-          else:
-            self._write_board_thumbnail(post["id"], index, data)
+          self._store_thumbnail(
+            post["id"], index, data, thumbnails[index] if thumbnails else None,
+          )
           metas.append({"mime": wire["mime"], "w": wire["w"], "h": wire["h"]})
         record["attachments"] = metas
         record["attachment"] = metas[0]
       elif attachment is not None:
         wire, data = attachment
         atomic_write(self.board_media_path(post["id"], wire["mime"]), data)
-        if thumbnails:
-          thumb_wire, thumb_data = thumbnails[0]
-          target = self.board_thumbnail_dir() / f"{post['id']}-0.{ATTACHMENT_MIME_EXT[thumb_wire['mime']]}"
-          atomic_write(target, thumb_data)
-        else:
-          self._write_board_thumbnail(post["id"], 0, data)
+        self._store_thumbnail(post["id"], 0, data, thumbnails[0] if thumbnails else None)
         record["attachment"] = {
           "mime": wire["mime"], "w": wire["w"], "h": wire["h"],
         }
@@ -1264,7 +1265,11 @@ def create_public_router(
     return post_id
 
   def checked_index(text: str) -> int:
-    if not (text.isascii() and text.isdigit()) or int(text) >= MAX_BOARD_ATTACHMENTS:
+    # One spelling per index ("5", never "05"), so shared caches keep one copy.
+    if (
+      not (text.isascii() and text.isdigit())
+      or str(int(text)) != text or int(text) >= MAX_BOARD_ATTACHMENTS
+    ):
       raise HTTPException(status_code=400, detail="Image index is invalid.")
     return int(text)
 

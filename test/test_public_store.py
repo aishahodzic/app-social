@@ -651,6 +651,7 @@ class BoardImageLinkTests(unittest.TestCase):
           f"/board/media/{gallery_id}/x.jpg",
           f"/board/media/{gallery_id}/-1.jpg",
           f"/board/thumbnail/{gallery_id}/{MAX_BOARD_ATTACHMENTS}.webp",
+          f"/board/media/{gallery_id}/01.jpg",
           "/board/media/not-an-id.jpg",
         ):
           with self.subTest(invalid=path):
@@ -662,6 +663,37 @@ class BoardImageLinkTests(unittest.TestCase):
             response = client.get(path)
             self.assertEqual(response.status_code, 404)
             self.assertEqual(response.headers["cache-control"], "no-store")
+
+  def test_a_supplied_thumbnail_of_another_type_is_kept_as_webp(self):
+    def encoded(size, fmt):
+      output = io.BytesIO()
+      Image.new("RGB", size, (48, 96, 160)).save(output, format=fmt)
+      return output.getvalue()
+
+    with tempfile.TemporaryDirectory() as directory:
+      store = CommonPublicStore(directory)
+      post = {"host": "author.example", "text": "", "created_at": 1.0, "replies": []}
+      single, gallery = str(uuid.uuid4()), str(uuid.uuid4())
+      original = ({"mime": "image/jpeg", "w": 640, "h": 480}, encoded((640, 480), "JPEG"))
+      supplied = ({"mime": "image/png", "w": 64, "h": 48}, encoded((64, 48), "PNG"))
+      store.store_post({**post, "id": single}, original, thumbnails=[supplied])
+      store.store_post(
+        {**post, "id": gallery}, attachments=[original, original],
+        thumbnails=[supplied, supplied],
+      )
+      self.assertEqual(
+        sorted(path.name for path in store.board_thumbnail_dir().iterdir()),
+        sorted([f"{single}-0.webp", f"{gallery}-0.webp", f"{gallery}-1.webp"]),
+      )
+      app = FastAPI()
+      router, _ = create_public_router(store, None)
+      app.include_router(router)
+      with TestClient(app) as client:
+        response = client.get(f"/board/thumbnail/{single}.webp")
+      self.assertEqual(response.status_code, 200)
+      self.assertEqual(response.headers["content-type"], "image/webp")
+      with Image.open(io.BytesIO(response.content)) as image:
+        self.assertEqual(image.size, (64, 48))
 
   def test_a_missing_member_avatar_is_never_cached(self):
     with tempfile.TemporaryDirectory() as directory:

@@ -1605,7 +1605,7 @@ async def _serve_owner_board_media(
 ):
   """Serve one community-board image (a gallery index or the first/legacy one),
   caching remote hosts for 24 hours. ``recorded_mime`` is the type the post
-  records for a full image; the host makes every thumbnail as WebP."""
+  records for a full image; the host keeps every thumbnail as WebP."""
 
   cache_dir = _peer_board_media_dir()
   base_stem = _peer_board_media_name(host, post_id)
@@ -1628,6 +1628,8 @@ async def _serve_owner_board_media(
     try:
       mime, data = await _download_board_media(_peer_service_url(host, suffix))
     except Exception:
+      # A full image's typed link names what the host stored, so a miss means
+      # it is gone; only a thumbnail has something else to fall back to.
       if not thumbnail:
         raise
       mime, data = await _download_board_media(
