@@ -77,7 +77,7 @@ export const CSS = `
 .cn-header-chip.is-loading { width: 104px; }
 .cn-header-chip-avatar-skeleton, .cn-header-chip-line-skeleton {
   display: block; flex: 0 0 auto;
-  background: color-mix(in srgb, var(--surface2, var(--surface)) 84%, transparent);
+  background: color-mix(in srgb, var(--surface-2, var(--surface)) 84%, transparent);
   animation: cn-skeleton-pulse 1.4s ease-in-out infinite alternate;
 }
 .cn-header-chip-avatar-skeleton { width: 30px; height: 30px; border-radius: 50%; }
@@ -331,7 +331,7 @@ export const CSS = `
   white-space: nowrap; text-overflow: ellipsis;
 }
 .cn-skeleton-avatar, .cn-skeleton-copy i {
-  display: block; background: color-mix(in srgb, var(--surface2, var(--surface)) 84%, transparent);
+  display: block; background: color-mix(in srgb, var(--surface-2, var(--surface)) 84%, transparent);
   animation: cn-skeleton-pulse 1.4s ease-in-out infinite alternate;
 }
 .cn-skeleton-avatar { width: 42px; height: 42px; border-radius: 50%; }
@@ -374,7 +374,7 @@ export const CSS = `
 .cn-view-actions svg { width: 18px; height: 18px; }
 .cn-message-tabs {
   display: inline-flex; min-height: 44px; margin: 0 0 10px; padding: 3px; gap: 2px;
-  border-radius: 13px; background: var(--surface2, var(--surface));
+  border-radius: 13px; background: var(--surface-2, var(--surface));
   box-shadow: none;
 }
 .cn-message-tabs button {
@@ -427,7 +427,7 @@ export const CSS = `
 /* ── Search field ───────────────────────────────────────────────────────── */
 .cn-search {
   min-height: 48px; border-radius: 15px;
-  background: color-mix(in srgb, var(--surface2, var(--surface)) 80%, transparent);
+  background: color-mix(in srgb, var(--surface-2, var(--surface)) 80%, transparent);
   border: 1px solid var(--border);
   margin: 4px 0 8px; padding: 0 14px; display: flex; gap: 10px; align-items: center;
   color: var(--muted); transition: border-color 0.15s ease, box-shadow 0.15s ease;
@@ -500,7 +500,7 @@ export const CSS = `
 .cn-day span {
   color: var(--muted); font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em;
   padding: 4px 11px; border-radius: 11px; text-transform: uppercase;
-  background: color-mix(in srgb, var(--surface2, var(--surface)) 80%, transparent);
+  background: color-mix(in srgb, var(--surface-2, var(--surface)) 80%, transparent);
 }
 .cn-bubble-row { display: flex; align-items: flex-end; gap: 8px; max-width: 86%; align-self: flex-start; }
 .cn-bubble-row .cn-bubble { max-width: 100%; align-self: auto; }
@@ -563,7 +563,7 @@ export const CSS = `
 .cn-bubble-reply svg { width: 17px; height: 17px; }
 .cn-message-line:hover .cn-bubble-reply,
 .cn-bubble-reply:focus-visible { opacity: 1; pointer-events: auto; }
-.cn-bubble-reply:hover { background: var(--surface2, var(--surface)); color: var(--text); }
+.cn-bubble-reply:hover { background: var(--surface-2, var(--surface)); color: var(--text); }
 .cn-quote {
   margin: 0 0 7px; padding: 7px 9px; min-width: 0;
   border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border)); border-radius: 8px;
@@ -617,7 +617,7 @@ export const CSS = `
   background: transparent; color: var(--muted);
   transition: background 0.14s ease, color 0.14s ease, transform 0.1s ease;
 }
-.cn-compose-image:hover { background: var(--surface2, var(--surface)); color: var(--text); }
+.cn-compose-image:hover { background: var(--surface-2, var(--surface)); color: var(--text); }
 .cn-compose-image:active { transform: scale(0.94); }
 .cn-compose-image:disabled { opacity: 0.45; cursor: default; transform: none; }
 .cn-compose-image svg { width: 21px; height: 21px; }
@@ -625,7 +625,7 @@ export const CSS = `
 .cn-selected-image {
   min-height: 62px; margin: 9px 12px 0; padding: 5px 5px 5px 6px;
   display: flex; align-items: center; gap: 10px;
-  background: var(--surface2, var(--surface)); border: 1px solid var(--border); border-radius: 14px;
+  background: var(--surface-2, var(--surface)); border: 1px solid var(--border); border-radius: 14px;
 }
 .cn-selected-image img { width: 50px; height: 50px; border-radius: 10px; object-fit: cover; display: block; }
 .cn-selected-image > span { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
@@ -657,7 +657,7 @@ export const CSS = `
 /* Image attachments: neutral while loading, never animated. */
 .cn-media {
   position: relative; display: block; width: 100%; min-height: 44px; padding: 0;
-  overflow: hidden; border: 0; background: var(--surface2, var(--surface)); color: var(--muted);
+  overflow: hidden; border: 0; background: var(--surface-2, var(--surface)); color: var(--muted);
   cursor: zoom-in;
 }
 .cn-media:disabled { cursor: default; }
@@ -686,7 +686,7 @@ export const CSS = `
 }
 .cn-selected-thumb {
   position: relative; width: 74px; height: 74px; border-radius: 12px;
-  overflow: hidden; background: var(--surface2, var(--surface));
+  overflow: hidden; background: var(--surface-2, var(--surface));
   border: 1px solid var(--border); flex: 0 0 auto;
 }
 .cn-selected-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
@@ -809,7 +809,7 @@ export const CSS = `
 .cn-intent-notice {
   display: flex; align-items: center; justify-content: space-between; gap: 14px;
   margin: 14px 0 2px; padding: 13px 14px; border-radius: 14px;
-  background: color-mix(in srgb, var(--surface2, var(--surface)) 72%, transparent);
+  background: color-mix(in srgb, var(--surface-2, var(--surface)) 72%, transparent);
   box-shadow: none;
 }
 .cn-intent-notice > div { min-width: 0; }
@@ -939,7 +939,7 @@ export const CSS = `
 .cn-btn:disabled { opacity: 0.5; cursor: default; transform: none; }
 .cn-btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 .cn-btn-primary:hover { filter: brightness(1.06); }
-.cn-btn-secondary { background: var(--surface2, var(--surface)); }
+.cn-btn-secondary { background: var(--surface-2, var(--surface)); }
 .cn-btn-secondary:hover { border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
 .cn-btn-ghost { background: transparent; border-color: transparent; color: var(--accent); }
 .cn-btn-ghost:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
