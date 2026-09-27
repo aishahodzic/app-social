@@ -10,7 +10,8 @@ from unittest.mock import AsyncMock, patch
 from PIL import Image
 
 with patch.dict(os.environ, {
-  "APP_STORAGE_DIR": tempfile.gettempdir(), "APP_ID": "7", "APP_SLUG": "social",
+  "APP_STORAGE_DIR": os.path.join(tempfile.gettempdir(), "social-board-media-tests"),
+  "APP_ID": "7", "APP_SLUG": "social",
 }):
   import social_routes
 
