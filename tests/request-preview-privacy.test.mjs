@@ -10,7 +10,7 @@ test('pending request rows cannot supply a remote avatar host', () => {
 
 test('pending DM previews gate actor discovery and every peer avatar until acceptance', () => {
   const source = read('Thread')
-  assert.match(source, /if \(requestPending\) return[^\n]*\n\s*getPeer\(peer\)/)
+  assert.match(source, /if \(requestPending\) return[^\n]*\n\s*getPeer\(peer[,)]/)
   assert.match(source, /\[peer, requestPending\]/)
   const avatars = source.match(/<Avatar[^>]+>/g)
   assert.equal(avatars.length, 2)

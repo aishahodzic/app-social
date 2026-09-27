@@ -1,5 +1,7 @@
 import asyncio
 import base64
+import hashlib
+import io
 import json
 import os
 import stat
@@ -14,6 +16,7 @@ import httpx
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
+from PIL import Image
 
 import common_public
 import community_host
@@ -147,6 +150,157 @@ class CommunityHostTests(unittest.TestCase):
     self.assertTrue(verify(
       payload, envelope["sig"], community_host.signing_public_key(private),
     ))
+
+  def test_board_images_are_cached_for_a_day_and_revalidate_with_not_modified(self):
+    with tempfile.TemporaryDirectory() as data_dir:
+      peer = _peer(Path(data_dir), "peer.example")
+      post_id = str(uuid.uuid4())
+      with TestClient(community_host.create_app(data_dir)) as client:
+        client.post("/api/common/board", json=_signed(peer, {
+          "v": 0, "type": "board_post", "id": post_id,
+          "from": "peer.example", "text": "", "sent_at": time.time(),
+          "attachment": {
+            "mime": "image/png", "data_b64": base64.b64encode(b"image").decode(),
+            "w": 1, "h": 1,
+          },
+        })).raise_for_status()
+        url = f"/api/common/board/media/{post_id}"
+        first = client.get(url)
+        # Deleted or moderated posts must drop out of shared caches.
+        self.assertEqual(first.headers["cache-control"], common_public.BOARD_IMAGE_CACHE)
+        revalidated = client.get(url, headers={"If-None-Match": first.headers["etag"]})
+        self.assertEqual(revalidated.status_code, 304)
+        self.assertEqual(revalidated.content, b"")
+        self.assertEqual(client.get(url, headers={"If-None-Match": '"other"'}).status_code, 200)
+
+  def test_registration_refreshes_the_member_avatar_without_waiting_for_it(self):
+    with tempfile.TemporaryDirectory() as data_dir:
+      peer = _peer(Path(data_dir), "member.example")
+      refreshed = AsyncMock()
+      with (
+        patch.object(community_host, "refresh_member_avatar", new=refreshed),
+        TestClient(community_host.create_app(data_dir)) as client,
+      ):
+        response = client.post("/api/common/directory", json=_signed(peer, {
+          "v": 0, "type": "register", "from": "member.example",
+          "handle": "member", "bio": "", "sent_at": time.time(),
+        }))
+        deadline = time.monotonic() + 5
+        while not refreshed.await_count and time.monotonic() < deadline:
+          time.sleep(0.02)
+    self.assertEqual(response.json(), {"status": "registered"})
+    self.assertEqual(refreshed.await_args.args[1], "member.example")
+
+  def test_member_avatars_are_content_addressed_and_follow_changes(self):
+    def png(color):
+      output = io.BytesIO()
+      Image.new("RGB", (300, 200), color).save(output, "PNG")
+      return output.getvalue()
+
+    def reply(status, content=b""):
+      return httpx.Response(
+        status, content=content, headers={"content-type": "image/png"},
+        request=httpx.Request("GET", "https://member.example/api/app-services/social/avatar"),
+      )
+
+    with tempfile.TemporaryDirectory() as data_dir:
+      store = common_public.CommonPublicStore(data_dir)
+      store.register("member.example", "member", "")
+      with patch.object(common_public, "federation_request", new=AsyncMock(
+        return_value=reply(200, png("#336699")),
+      )):
+        asyncio.run(common_public.refresh_member_avatar(store, "member.example"))
+      first = store.member_avatars()["member.example"]
+      stored = store.member_avatar_file(f"{first}.webp")
+      self.assertEqual(hashlib.sha256(stored.read_bytes()).hexdigest(), first)
+      with Image.open(stored) as rendition:
+        self.assertEqual((rendition.format, max(rendition.size)), ("WEBP", 128))
+      self.assertEqual(store.search_directory("")["users"][0]["avatar"], first)
+
+      # Re-registering (a bio or handle change) keeps the current copy.
+      store.register("member.example", "member", "hello")
+      self.assertEqual(store.member_avatars()["member.example"], first)
+
+      with TestClient(community_host.create_app(data_dir)) as client:
+        image = client.get(f"/api/common/directory/avatars/{first}.webp")
+        self.assertEqual(image.headers["content-type"], "image/webp")
+        self.assertEqual(image.headers["cache-control"], common_public.IMMUTABLE_PUBLIC)
+        self.assertEqual(client.get(
+          f"/api/common/directory/avatars/{first}.webp",
+          headers={"If-None-Match": f'"{first}"'},
+        ).status_code, 304)
+        self.assertEqual(client.get("/api/common/directory/avatars/nothing.webp").status_code, 404)
+
+      with patch.object(common_public, "federation_request", new=AsyncMock(
+        return_value=reply(200, png("#993366")),
+      )):
+        asyncio.run(common_public.refresh_member_avatar(store, "member.example"))
+      second = store.member_avatars()["member.example"]
+      self.assertNotEqual(second, first)
+      self.assertIsNone(store.member_avatar_file(f"{first}.webp"))
+
+      # An unreachable member keeps its copy, and is not retried for a day.
+      with patch.object(common_public, "federation_request", new=AsyncMock(
+        side_effect=httpx.ConnectError("down"),
+      )):
+        asyncio.run(common_public.refresh_member_avatar(store, "member.example"))
+      self.assertEqual(store.member_avatars()["member.example"], second)
+      self.assertEqual(store.members_due_for_avatar_check(10), [])
+      # A removed avatar clears the copy.
+      with patch.object(common_public, "federation_request", new=AsyncMock(
+        return_value=reply(404),
+      )):
+        asyncio.run(common_public.refresh_member_avatar(store, "member.example"))
+      self.assertNotIn("member.example", store.member_avatars())
+      self.assertIsNone(store.member_avatar_file(f"{second}.webp"))
+
+  def test_every_member_copy_is_refreshed_daily_oldest_first(self):
+    # Instances that never re-register (older versions, failed registrations)
+    # still get their picture re-copied within a day.
+    with tempfile.TemporaryDirectory() as data_dir:
+      store = common_public.CommonPublicStore(data_dir)
+      for host in ("old.example", "new.example", "never.example"):
+        store.register(host, host.split(".")[0], "")
+      with patch.object(common_public.time, "time", return_value=1_000.0):
+        store.set_member_avatar("old.example", b"old")
+      with patch.object(common_public.time, "time", return_value=50_000.0):
+        store.set_member_avatar("new.example", b"new")
+      day = common_public.MEMBER_AVATAR_MAX_AGE_S
+      self.assertEqual(
+        store.members_due_for_avatar_check(10, now=1_000.0 + day),
+        ["never.example", "old.example"],
+      )
+      self.assertEqual(store.members_due_for_avatar_check(1, now=1_000.0 + day), ["never.example"])
+      # Re-registering keeps the check time, so it does not reset the schedule.
+      store.register("old.example", "old", "bio")
+      self.assertIn("old.example", store.members_due_for_avatar_check(10, now=1_000.0 + day))
+
+  def test_board_rows_name_author_and_reply_author_avatars(self):
+    with tempfile.TemporaryDirectory() as data_dir:
+      root = Path(data_dir)
+      author = _peer(root, "author.example")
+      replier = _peer(root, "replier.example")
+      store = common_public.CommonPublicStore(data_dir)
+      for host in ("author.example", "replier.example"):
+        store.register(host, host.split(".")[0], "")
+      store.set_member_avatar("author.example", b"author-rendition")
+      store.set_member_avatar("replier.example", b"replier-rendition")
+      post_id = str(uuid.uuid4())
+      with TestClient(community_host.create_app(data_dir)) as client:
+        client.post("/api/common/board", json=_signed(author, {
+          "v": 0, "type": "board_post", "id": post_id, "from": "author.example",
+          "text": "Hello", "sent_at": time.time(),
+        })).raise_for_status()
+        client.post("/api/common/board/reply", json=_signed(replier, {
+          "v": 0, "type": "board_reply", "post_id": post_id, "id": str(uuid.uuid4()),
+          "from": "replier.example", "text": "Hi", "sent_at": time.time(),
+        })).raise_for_status()
+        post = client.get("/api/common/board").json()["posts"][0]
+        replies = client.get(f"/api/common/board/{post_id}/replies").json()["replies"]
+    digest = lambda data: hashlib.sha256(data).hexdigest()
+    self.assertEqual(post["avatar"], digest(b"author-rendition"))
+    self.assertEqual(post["reply_authors"][0]["avatar"], digest(b"replier-rendition"))
+    self.assertEqual(replies[0]["avatar"], digest(b"replier-rendition"))
 
   def test_invalid_baked_revision_fails_closed(self):
     with patch.dict(os.environ, {"SOCIAL_SOURCE_SHA": "main"}, clear=False):

@@ -92,6 +92,30 @@ class SocialServiceTests(unittest.TestCase):
       )
       self.assertEqual(probe.returncode, 0, probe.stderr)
 
+  def test_preloaded_module_setup_needs_no_request_credential_and_starts_no_threads(self):
+    # MOBIUS_PRELOAD lets Möbius run module setup once, without APP_TOKEN, and
+    # fork each request from it; the per-request block must stay last.
+    import ast
+    tree = ast.parse((ROOT / "service.py").read_text())
+    last = tree.body[-1]
+    self.assertIsInstance(last, ast.If)
+    self.assertEqual(ast.unparse(last.test), "__name__ == '__main__'")
+    self.assertIn("MOBIUS_PRELOAD = True", [ast.unparse(node) for node in tree.body])
+    with tempfile.TemporaryDirectory() as directory:
+      env = {
+        key: value for key, value in os.environ.items() if key != "APP_TOKEN"
+      }
+      env.update(APP_STORAGE_DIR=directory, APP_ID="7", APP_SLUG="social")
+      probe = subprocess.run(
+        [
+          sys.executable, "-c",
+          "import threading, service; assert service.MOBIUS_PRELOAD is True; "
+          "assert threading.active_count() == 1, threading.enumerate()",
+        ],
+        cwd=ROOT, env=env, text=True, capture_output=True,
+      )
+    self.assertEqual(probe.returncode, 0, probe.stderr)
+
   def test_host_group_transaction_preserves_concurrent_member_updates(self):
     with tempfile.TemporaryDirectory() as directory:
       storage = Path(directory) / "apps" / "7"

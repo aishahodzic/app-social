@@ -2,6 +2,7 @@
 
 import io
 import asyncio
+import hashlib
 import multiprocessing
 import os
 import tempfile
@@ -226,8 +227,110 @@ class PeerAvatarHardeningTests(unittest.IsolatedAsyncioTestCase):
     self.assertEqual(response["missing"], [])
     self.assertEqual(response["unavailable"], [])
 
+  async def test_matching_directory_digest_needs_no_network_at_any_age(self):
+    digest = "a" * 64
+    with self.route_context():
+      cache = social_routes._peer_avatar_path("member.example")
+      cache.write_bytes(b"cached-webp")
+      social_routes._peer_avatar_digest_path("member.example").write_text(digest)
+      old = time.time() - 30 * 24 * 3600
+      os.utime(cache, (old, old))
+      download = AsyncMock(side_effect=AssertionError("unexpected avatar fetch"))
+      with patch.object(social_routes, "_download_avatar", download), patch.object(
+        social_routes, "_fetch_actor", AsyncMock(side_effect=AssertionError("actor")),
+      ):
+        found = await social_routes._resolve_peer_avatar("member.example", digest)
+    self.assertEqual(found, (cache, "image/webp"))
+    download.assert_not_awaited()
+
+  async def test_new_directory_digest_comes_verified_from_the_community_host(self):
+    raw = png(256, 256)
+    digest = hashlib.sha256(raw).hexdigest()
+    download = AsyncMock(return_value=raw)
+    with self.route_context(), patch.object(
+      social_routes, "_download_avatar", download,
+    ), patch.object(
+      social_routes, "_fetch_actor", AsyncMock(side_effect=AssertionError("actor")),
+    ):
+      response = await social_routes.get_peer_avatars(
+        social_routes.AvatarBatch(
+          hosts=["member.example"], avatars={"member.example": digest},
+        ), None, None,
+      )
+    url = download.await_args.args[0]
+    self.assertTrue(url.startswith(f"https://{social_routes.COMMUNITY_HOST}/"))
+    self.assertTrue(url.endswith(f"/directory/avatars/{digest}.webp"))
+    self.assertEqual(response["digests"], {"member.example": digest})
+    with Image.open(io.BytesIO(__import__("base64").b64decode(
+      response["avatars"]["member.example"]["data_b64"],
+    ))) as avatar:
+      self.assertEqual((avatar.format, avatar.size), ("WEBP", (128, 128)))
+
+  async def test_a_copy_that_fails_its_digest_falls_back_to_the_members_server(self):
+    member_raw = png(64, 64)
+    calls = []
+
+    async def download(url):
+      calls.append(url)
+      return png(40, 40) if "/directory/avatars/" in url else member_raw
+
+    with self.route_context(), patch.object(
+      social_routes, "_download_avatar", side_effect=download,
+    ), patch.object(
+      social_routes, "_fetch_actor", AsyncMock(return_value={"avatar": True}),
+    ):
+      response = await social_routes.get_peer_avatars(
+        social_routes.AvatarBatch(
+          hosts=["member.example"], avatars={"member.example": "b" * 64},
+        ), None, None,
+      )
+      self.assertFalse(social_routes._peer_avatar_digest_path("member.example").exists())
+    self.assertEqual(len(calls), 2)
+    self.assertIn("member.example", response["avatars"])
+    self.assertEqual(response["digests"], {})
+
+  def test_owner_board_images_are_kept_by_the_browser(self):
+    image = self.root / "post-thumb.webp"
+    image.write_bytes(b"webp")
+    response = social_routes._serve_image((image, "image/webp"))
+    self.assertEqual(response.headers["cache-control"], "private, max-age=86400")
+
+  async def test_a_joined_owner_reregisters_until_the_directory_is_current(self):
+    listed = {"handle": "owner", "avatar": "https://you.example/old.png"}
+    for joined, synced, changes, expected in (
+      (True, listed, {"avatar_url": "https://you.example/new.png"}, 1),
+      (True, listed, {"handle": "renamed"}, 1),
+      (True, listed, {}, 0),
+      # A registration that failed earlier is retried on the next check.
+      (True, {"handle": "owner", "avatar": ""}, {}, 1),
+      (True, None, {}, 1),
+      (False, None, {"avatar_url": "https://you.example/new.png"}, 0),
+    ):
+      identity = {
+        "name": "Owner", "handle": "owner", "private_key_b64": "k",
+        "avatar_source_url": "https://you.example/old.png",
+        **({"joined_at": 1} if joined else {}),
+        **({"directory_synced": synced} if synced else {}),
+      }
+      profile = {
+        "display_name": "Owner", "handle": "owner",
+        "avatar_url": "https://you.example/old.png", **changes,
+      }
+      register = AsyncMock(return_value="registered")
+      with patch.object(social_routes, "_load_identity", return_value=identity), patch.object(
+        social_routes, "owner_profile", AsyncMock(return_value=profile),
+      ), patch.object(
+        social_routes, "_download_avatar", AsyncMock(return_value=png()),
+      ), patch.object(
+        social_routes, "_avatar_path", return_value=self.root / "avatar.png",
+      ), patch.object(social_routes, "_save_identity"), patch.object(
+        social_routes, "_register_with_community_host", register,
+      ):
+        await social_routes._refresh_profile_cache(None, None)
+      self.assertEqual(register.await_count, expected, (joined, synced, changes))
+
   async def test_avatar_batch_preserves_missing_and_transient_states(self):
-    async def resolve(host):
+    async def resolve(host, _directory_digest=None):
       if host == "missing.example":
         raise HTTPException(status_code=404, detail="missing")
       raise HTTPException(status_code=502, detail="offline")
@@ -248,7 +351,7 @@ class PeerAvatarHardeningTests(unittest.IsolatedAsyncioTestCase):
     fast = self.root / "fast.webp"
     fast.write_bytes(b"fast")
 
-    async def resolve(host):
+    async def resolve(host, _directory_digest=None):
       if host == "fast.example":
         return fast, "image/webp"
       await asyncio.sleep(0.1)
@@ -355,7 +458,7 @@ class PeerAvatarHardeningTests(unittest.IsolatedAsyncioTestCase):
         waiter.join(2)
 
   async def test_timed_out_refresh_keeps_a_stale_cached_avatar(self):
-    async def resolve(_host):
+    async def resolve(_host, _directory_digest=None):
       await asyncio.sleep(0.1)
       raise AssertionError("slow resolver was not cancelled")
 

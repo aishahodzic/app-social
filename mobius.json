@@ -3,7 +3,7 @@
   "package_id": "urn:uuid:33fae9ec-b2fb-4351-8a4e-85bcc362b546",
   "previous_id": "common",
   "name": "Social",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Federated social for Möbius people — private messages between instances, a community board, and people search.",
   "author": "hamzamerzic",
   "license": "MIT",
@@ -25,6 +25,8 @@
   "source_files": [
     "api.js",
     "avatarCache.js",
+    "avatarHints.js",
+    "boardMediaCache.js",
     "message_ui_state.js",
     "community.js",
     "participation.js",

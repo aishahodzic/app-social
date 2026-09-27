@@ -54,7 +54,7 @@ test('conversation recovery is visible and new messages do not steal the reading
     assert.match(source, /reconcileOlderPage/)
     assert.match(source, /generation === paginationGeneration\.current/)
     assert.match(source, /Loading messages…/)
-    assert.match(source, /getCached(?:Group)?Messages/)
+    assert.match(source, /watchLatest(?:Group)?Messages/)
   }
 })
 
@@ -96,7 +96,7 @@ test('public board startup is not gated by identity and avoids oversized empty-s
   assert.match(app, /storage\?\.get\('cache\/board\.json'\)/)
   assert.match(app, /api\.getBootstrap\(\)/)
   const bootstrap = app.slice(app.indexOf('async function loadBootstrap()'), app.indexOf('const loadEarlierFeed'))
-  assert.match(bootstrap, /loadMe\(\{ background: true \}\)/)
+  assert.match(bootstrap, /loadMe\(\{ background: true, verified: result\.me \}\)/)
   assert.doesNotMatch(bootstrap, /if \(!result\.me\?\.connected\)/)
   assert.match(app, /reconcileFeedPage\(posts, current, api\.BOARD_PAGE_SIZE\)/)
   assert.match(app, /loadEarlierFeed/)
@@ -134,7 +134,7 @@ test('people and accepted messages use real avatars without flooding a large dir
   assert.match(messages, /className="cn-request-banner"/)
   assert.match(people, /cache\/people\.json/)
   assert.match(people, /DIRECTORY_CACHE_MAX_AGE_MS = 60_000/)
-  assert.match(app, /api\.searchPeople\(''\)/)
+  assert.match(app, /api\.searchPeople\('', undefined, \{ background: true \}\)/)
   assert.match(board, /subscribeAvatar\(record, update\)/)
   assert.doesNotMatch(board, /AVATAR_CONCURRENCY/)
   assert.match(app, /primeAvatar\(result\.me\?\.host, result\.me\?\.avatar\)/)

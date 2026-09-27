@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Search, Telescope } from '@openai/apps-sdk-ui/components/Icon'
 import { searchPeople } from '../api.js'
+import { noteAvatarDigests } from '../avatarHints.js'
 import { Avatar, useProfile } from './Board.jsx'
 import { useModalFocus } from './modalFocus.js'
 import { focusProfileReturnTarget, membershipDuration } from '../profile.js'
@@ -71,6 +72,7 @@ export default function People({ me, canMessage, onMessage, showToast, requested
         if (!active) return
         const hasPeople = Array.isArray(cached?.users)
         if (hasPeople) {
+          noteAvatarDigests(cached.users)
           setResults(cached.users)
           setState('ready')
         }

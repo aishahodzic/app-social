@@ -262,6 +262,50 @@ class DirectDeliveryTests(unittest.IsolatedAsyncioTestCase):
       ["known", "saved-before-exit", "later"],
     )
 
+  def _published_page(self, scope="dm", conversation="peer.example"):
+    path = self.storage / "cache" / "message-history" / scope / f"{conversation}.json"
+    return social_routes.json.loads(path.read_text()) if path.is_file() else None
+
+  async def test_received_message_is_published_for_first_paint_before_the_app_asks(self):
+    # The app paints a conversation from this page before its history request
+    # returns, so it must already include a message that arrived while closed.
+    for index, text in enumerate(["First", "Second"], start=1):
+      await social_routes._store_message(None, self.app, "peer.example", {
+        "id": f"message-{index}", "dir": "in", "peer": "peer.example",
+        "text": text, "sent_at": float(index), "status": "delivered",
+      })
+    page = self._published_page()
+    self.assertEqual([m["id"] for m in page["messages"]], ["message-1", "message-2"])
+    self.assertIsNone(page["next_cursor"])
+
+  async def test_a_host_with_a_port_publishes_under_the_name_the_app_reads(self):
+    # The app requests cache/message-history/dm/<encodeURIComponent(host)>;
+    # the storage route decodes it, so the file must carry the raw host.
+    await social_routes._store_message(None, self.app, "peer.example:8443", {
+      "id": "ported", "dir": "in", "peer": "peer.example:8443",
+      "text": "Hi", "sent_at": 1.0, "status": "delivered",
+    })
+    page = self._published_page(conversation="peer.example:8443")
+    self.assertEqual([m["id"] for m in page["messages"]], ["ported"])
+
+  async def test_published_page_matches_the_newest_history_page_and_ignores_older_pages(self):
+    messages_dir = social_routes._conversation_dir(self.app, "peer.example") / "msgs"
+    messages_dir.mkdir(parents=True)
+    # Messages written before the service published pages (no mutation hook).
+    for index in range(1, 56):
+      (messages_dir / f"m{index:02d}.json").write_text(social_routes.json.dumps({
+        "id": f"m{index:02d}", "dir": "in", "peer": "peer.example",
+        "text": "x", "sent_at": float(index), "status": "delivered",
+      }))
+    self.assertIsNone(self._published_page())
+    newest = await message_history.load_page(self.app.id, "dm", "peer.example", messages_dir)
+    self.assertEqual(self._published_page(), newest)
+    older = await message_history.load_page(
+      self.app.id, "dm", "peer.example", messages_dir, cursor=newest["next_cursor"],
+    )
+    self.assertEqual([m["id"] for m in older["messages"]], [f"m{i:02d}" for i in range(1, 6)])
+    self.assertEqual(self._published_page(), newest)
+
 
 if __name__ == "__main__":
   unittest.main()

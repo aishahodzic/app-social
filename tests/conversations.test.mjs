@@ -1,9 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  getCachedGroupMessages, getCachedMessages, getGroup, listConversations,
-  listGroupMessages, listGroups, listMessages,
-  requestStatus,
+  getGroup, listConversations, listGroupMessages, listGroups, listMessages,
+  requestStatus, watchLatestGroupMessages, watchLatestMessages,
 } from '../api.js'
 
 test.afterEach(() => {
@@ -116,32 +115,63 @@ test('an offline history miss remains visible instead of becoming a false empty 
   await assert.rejects(() => listMessages('peer.example'), /offline/)
 })
 
-test('the newest direct history page is cached for an immediate reopen', async () => {
-  const writes = []
+test('history reads leave the first-paint page to the service that publishes it', async () => {
+  // The service republishes the newest page on every message change, so a
+  // client write could only replace it with an older response.
   const page = { messages: [{ id: 'one', sent_at: 1 }], next_cursor: 'next' }
   globalThis.window = { mobius: { storage: {
-    async set(path, value) { writes.push([path, value]) },
-    async get(path) {
-      assert.equal(path, 'cache/message-history/dm/peer.example.json')
-      return page
-    },
+    async set() { assert.fail('the client must not write the published page') },
   } } }
   globalThis.fetch = async () => ({ ok: true, async json() { return page } })
-
   assert.deepEqual(await listMessages('peer.example'), page)
-  await new Promise(setImmediate)
-  assert.deepEqual(writes, [['cache/message-history/dm/peer.example.json', page]])
-  assert.deepEqual(await getCachedMessages('peer.example'), page)
+  assert.deepEqual(await listGroupMessages('group-1'), page)
 })
 
-test('newer canonical direct history wins over an older first-paint snapshot offline', async () => {
-  const cached = { messages: [{ id: 'earlier', sent_at: 1 }], next_cursor: null }
+test('a conversation watcher paints the device copy, then the service copy, and skips malformed pages', () => {
+  const device = { messages: [{ id: 'old', sent_at: 1 }], next_cursor: null }
+  const current = { messages: [{ id: 'old', sent_at: 1 }, { id: 'new', sent_at: 2 }], next_cursor: null }
+  let deliver = null
+  let unsubscribed = 0
+  const reads = []
+  globalThis.window = { mobius: { storage: {
+    subscribe(path, callback) {
+      assert.equal(path, 'cache/message-history/dm/peer.example.json')
+      deliver = callback
+      return () => { unsubscribed += 1 }
+    },
+    async get(path) { reads.push(path); return current },
+  } } }
+  const pages = []
+  const watch = watchLatestMessages('peer.example', page => pages.push(page))
+  deliver(device)
+  deliver({ messages: 'not a page' })
+  deliver(null)
+  watch.recheck()
+  deliver(current)
+  assert.deepEqual(pages, [device, current])
+  assert.deepEqual(reads, ['cache/message-history/dm/peer.example.json'])
+  watch.stop()
+  deliver({ messages: [], next_cursor: null })
+  assert.equal(pages.length, 2)
+  assert.equal(unsubscribed, 1)
+})
+
+test('group watchers read the group page path and degrade without subscriptions', () => {
+  let watched = null
+  globalThis.window = { mobius: { storage: {
+    subscribe(path) { watched = path; return () => {} },
+  } } }
+  watchLatestGroupMessages('group-1', () => {}).stop()
+  assert.equal(watched, 'cache/message-history/group/group-1.json')
+  globalThis.window = { mobius: { storage: {} } }
+  const inert = watchLatestMessages('peer.example', () => assert.fail('no subscription'))
+  inert.recheck()
+  inert.stop()
+})
+
+test('offline direct history reads every canonical saved message, newest included', async () => {
   globalThis.fetch = async () => { throw new TypeError('offline') }
   globalThis.window = { mobius: { storage: {
-    async get(path) {
-      assert.equal(path, 'cache/message-history/dm/newer.example.json')
-      return cached
-    },
     async list(path, options) {
       assert.equal(path, 'conversations/newer.example/msgs/')
       assert.deepEqual(options, { includeContent: true })
@@ -152,7 +182,6 @@ test('newer canonical direct history wins over an older first-paint snapshot off
     },
   } } }
 
-  assert.deepEqual(await getCachedMessages('newer.example'), cached)
   assert.deepEqual(await listMessages('newer.example'), {
     messages: [
       { id: 'earlier', sent_at: 1 },
@@ -162,51 +191,9 @@ test('newer canonical direct history wins over an older first-paint snapshot off
   })
 })
 
-test('a stalled cache write cannot delay a successful direct history read', async () => {
-  const page = { messages: [{ id: 'current', sent_at: 1 }], next_cursor: null }
-  globalThis.fetch = async () => ({ ok: true, async json() { return page } })
-  globalThis.window = { mobius: { storage: {
-    async set() { return new Promise(() => {}) },
-  } } }
-
-  const result = await Promise.race([
-    listMessages('stalled-write.example'),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('cache write blocked history')), 50)),
-  ])
-  assert.deepEqual(result, page)
-})
-
-test('reversed direct responses cannot regress the persisted latest page', async () => {
-  const responses = []
-  const writes = []
-  const older = { messages: [{ id: 'older', sent_at: 1 }], next_cursor: null }
-  const newer = { messages: [{ id: 'newer', sent_at: 2 }], next_cursor: null }
-  globalThis.fetch = async () => new Promise((resolve) => responses.push(resolve))
-  globalThis.window = { mobius: { storage: {
-    async set(path, page) { writes.push([path, page]) },
-  } } }
-
-  const first = listMessages('reversed.example')
-  const second = listMessages('reversed.example')
-  responses[1]({ ok: true, async json() { return newer } })
-  assert.deepEqual(await second, newer)
-  responses[0]({ ok: true, async json() { return older } })
-  assert.deepEqual(await first, older)
-  await new Promise(setImmediate)
-
-  assert.deepEqual(writes, [[
-    'cache/message-history/dm/reversed.example.json', newer,
-  ]])
-})
-
-test('group snapshots are first-paint hints while canonical history owns offline recovery', async () => {
-  const cached = { messages: [{ id: 'earlier', sent_at: 1 }], next_cursor: 'older' }
+test('canonical group history owns offline recovery', async () => {
   globalThis.fetch = async () => { throw new TypeError('offline') }
   globalThis.window = { mobius: { storage: {
-    async get(path) {
-      assert.equal(path, 'cache/message-history/group/group-1.json')
-      return cached
-    },
     async list(path, options) {
       assert.equal(path, 'groups/group-1/msgs/')
       assert.deepEqual(options, { includeContent: true })
@@ -217,7 +204,6 @@ test('group snapshots are first-paint hints while canonical history owns offline
     },
   } } }
 
-  assert.deepEqual(await getCachedGroupMessages('group-1'), cached)
   assert.deepEqual(await listGroupMessages('group-1'), {
     messages: [
       { id: 'earlier', sent_at: 1 },

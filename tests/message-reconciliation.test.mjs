@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  isDefinitePrecommitRejection, mergeMessages, reconcileLatestPage,
+  addUnseenMessages, isDefinitePrecommitRejection, mergeMessages, reconcileLatestPage,
   reconcileOlderPage, settleMessage, settleOptimistic,
 } from '../message_ui_state.js'
 
@@ -192,4 +192,23 @@ test('deferred older page cannot overwrite a reset pagination chain', () => {
   assert.equal(deferred, null)
   assert.deepEqual(reset.messages, [message('latest', 200)])
   assert.equal(reset.nextCursor, 'before-200')
+})
+
+test('a published first-paint page only adds unseen messages and never rewinds one on screen', () => {
+  const shown = [
+    { id: 'a', sent_at: 1, status: 'delivered' },
+    { id: 'b', sent_at: 2, status: 'delivered' },
+  ]
+  const olderPage = { messages: [{ id: 'b', sent_at: 2, status: 'sending' }], next_cursor: null }
+  assert.equal(addUnseenMessages(shown, olderPage), shown)
+
+  const arrived = { messages: [
+    { id: 'b', sent_at: 2, status: 'sending' },
+    { id: 'c', sent_at: 3, dir: 'in' },
+  ], next_cursor: null }
+  assert.deepEqual(addUnseenMessages(shown, arrived), [
+    { id: 'a', sent_at: 1, status: 'delivered' },
+    { id: 'b', sent_at: 2, status: 'delivered' },
+    { id: 'c', sent_at: 3, dir: 'in' },
+  ])
 })

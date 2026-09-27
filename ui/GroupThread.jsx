@@ -4,7 +4,8 @@ import {
 } from '@openai/apps-sdk-ui/components/Icon'
 import {
   acceptGroupInvitation, clearGroupUnread, clockTime, declineGroupInvitation,
-  getCachedGroupMessages, getGroup, listGroupMessages, requestStatus, sendGroupMessage,
+  getGroup, listGroupMessages, requestStatus, sendGroupMessage,
+  watchLatestGroupMessages,
 } from '../api.js'
 import { GroupAvatar } from './Messages.jsx'
 import { Avatar } from './Board.jsx'
@@ -13,8 +14,8 @@ import MessageInput from './MessageInput.jsx'
 import GroupDetails from './GroupDetails.jsx'
 import { prepareImage, SelectedImageStrip } from './Media.jsx'
 import {
-  isDefinitePrecommitRejection, reconcileLatestPage, reconcileOlderPage,
-  settleOptimistic,
+  addUnseenMessages, isDefinitePrecommitRejection, reconcileLatestPage,
+  reconcileOlderPage, settleOptimistic,
 } from '../message_ui_state.js'
 
 export default function GroupThread({
@@ -24,6 +25,7 @@ export default function GroupThread({
   const [currentGroup, setCurrentGroup] = useState(group)
   const [loadError, setLoadError] = useState('')
   const refreshRequest = useRef(0)
+  const latestPage = useRef(null)
   const paginationGeneration = useRef(0)
   const seenVersion = useRef(version)
   const [messages, setMessages] = useState(null)
@@ -49,10 +51,12 @@ export default function GroupThread({
     setMessages(value)
   }
 
-  async function refresh({ replace = false } = {}) {
+  async function refresh({ replace = false, background = false } = {}) {
     const request = ++refreshRequest.current
     try {
-      const [page, metadata] = await Promise.all([listGroupMessages(gid), getGroup(gid)])
+      const [page, metadata] = await Promise.all([
+        listGroupMessages(gid, null, { background }), getGroup(gid),
+      ])
       if (request !== refreshRequest.current) return false
       const reconciled = reconcileLatestPage(messagesRef.current, page, { replace })
       updateMessages(reconciled.messages)
@@ -69,19 +73,27 @@ export default function GroupThread({
   }
 
   useEffect(() => {
-    let active = true
     seenVersion.current = version
     paginationGeneration.current += 1
     updateMessages(null)
     setNextCursor(null)
-    getCachedGroupMessages(gid).then((page) => {
-      if (!active || messagesRef.current !== null || !page?.messages.length) return
-      const reconciled = reconcileLatestPage(null, page, { replace: true })
-      updateMessages(reconciled.messages)
-      setNextCursor(reconciled.nextCursor)
-    }).catch(() => {})
+    const watch = watchLatestGroupMessages(gid, (page) => {
+      if (messagesRef.current === null) {
+        if (!page.messages.length) return
+        const reconciled = reconcileLatestPage(null, page, { replace: true })
+        updateMessages(reconciled.messages)
+        setNextCursor(reconciled.nextCursor)
+        return
+      }
+      updateMessages((prior) => addUnseenMessages(prior, page))
+    })
+    latestPage.current = watch
     refresh({ replace: true })
-    return () => { active = false; refreshRequest.current += 1 }
+    return () => {
+      watch.stop()
+      latestPage.current = null
+      refreshRequest.current += 1
+    }
   }, [gid])
   // Messages are read only while this pane is actually visible to the owner.
   const isMember = requestStatus(currentGroup) === 'accepted'
@@ -91,7 +103,9 @@ export default function GroupThread({
   useEffect(() => {
     if (version > 0 && version !== seenVersion.current) {
       seenVersion.current = version
-      refresh()
+      // See Thread: the published page shows new messages at once.
+      latestPage.current?.recheck()
+      refresh({ background: true })
     }
   }, [version])
   async function loadEarlier() {

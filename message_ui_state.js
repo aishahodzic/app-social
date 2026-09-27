@@ -32,6 +32,16 @@ export function reconcileLatestPage(prior, page, { replace = false } = {}) {
   }
 }
 
+// The published first-paint page can arrive before or after an authoritative
+// history response, so it may be older than what is on screen. It may only add
+// messages the view has not seen yet; changes to a message already shown
+// (delivery status, retries) belong to the authoritative history.
+export function addUnseenMessages(prior, page) {
+  const known = new Set((prior || []).map((message) => message.id))
+  const unseen = (page?.messages || []).filter((message) => !known.has(message.id))
+  return unseen.length ? mergeMessages(prior, unseen) : prior
+}
+
 export function reconcileOlderPage(
   prior, page, requestGeneration, currentGeneration,
 ) {

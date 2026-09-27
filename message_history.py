@@ -232,6 +232,44 @@ def mirror_message(
     pass
   if mirrored and owns_dirty_marker:
     _finish_message_mutation(scope, conversation)
+  _publish_latest_page(scope, conversation, path.parent)
+
+
+def _latest_page_path(scope: str, conversation: str) -> Path:
+  # api.js reads this app-storage path (directHistoryCachePath /
+  # groupHistoryCachePath). The storage route decodes the name the app sends,
+  # so the file carries the raw host or group id; both are validated ids that
+  # cannot contain a path separator.
+  if "/" in conversation or conversation in ("", ".", ".."):
+    raise ValueError("Conversation id is not a file name.")
+  return _storage() / "cache" / "message-history" / scope / f"{conversation}.json"
+
+
+def _write_latest_page(scope: str, conversation: str, page: dict) -> None:
+  target = _latest_page_path(scope, conversation)
+  target.parent.mkdir(parents=True, exist_ok=True)
+  atomic_write(target, json.dumps(page, separators=(",", ":")))
+
+
+def _publish_latest_page(scope: str, conversation: str, messages_dir: Path) -> None:
+  """Keep the app's first-paint page as current as the saved messages.
+
+  The app paints a conversation from this page before its history request
+  returns, so a page written only when the app last opened the conversation
+  would hide every message received since. Every message mutation therefore
+  republishes it while the caller still holds the app storage lock; the
+  service is its only writer. The page is advisory: a failure here leaves the
+  canonical JSON and the history route unaffected.
+  """
+  try:
+    try:
+      _reconcile_conversation(scope, conversation, messages_dir)
+      page = read_page(scope, conversation)
+    except sqlite3.Error:
+      page = _read_file_page(messages_dir, cursor=None, limit=DEFAULT_PAGE_SIZE)
+    _write_latest_page(scope, conversation, page)
+  except (OSError, ValueError):
+    pass
 
 
 def _decode_cursor(cursor: str | None) -> tuple[float, str] | None:
@@ -258,93 +296,91 @@ def _encode_cursor(sent_at: float, message_id: str) -> str:
   return base64.urlsafe_b64encode(payload).decode().rstrip("=")
 
 
-async def ensure_conversation(
-  app_id: int, scope: str, conversation: str, messages_dir: Path,
-) -> None:
-  """Reconcile one conversation when its durable JSON version has advanced."""
-  if scope not in _SCOPES:
-    raise ValueError("Unknown message scope.")
-  async with fs_locks.app_storage_lock(app_id):
-    current_version = _version()
-    dirty = _dirty_path(scope, conversation).is_file()
-    with _index() as connection:
-      state = connection.execute(
+def _reconcile_conversation(scope: str, conversation: str, messages_dir: Path) -> None:
+  """Reconcile one conversation when its durable JSON version has advanced.
+
+  The caller holds the app storage lock.
+  """
+  current_version = _version()
+  dirty = _dirty_path(scope, conversation).is_file()
+  with _index() as connection:
+    state = connection.execute(
+      """
+      SELECT indexed_version FROM conversation_state
+      WHERE scope = ? AND conversation = ?
+      """,
+      (scope, conversation),
+    ).fetchone()
+    if not dirty and state is not None and int(state["indexed_version"]) == current_version:
+      return
+    coverage = connection.execute(
+      "SELECT covered_from, covered_through FROM history_coverage WHERE singleton = 1"
+    ).fetchone()
+    if (
+      not dirty and state is not None and coverage is not None
+      and current_version >= int(state["indexed_version"])
+      and int(state["indexed_version"]) >= int(coverage["covered_from"]) - 1
+      and int(coverage["covered_through"]) == current_version
+    ):
+      connection.execute(
         """
-        SELECT indexed_version FROM conversation_state
+        UPDATE conversation_state SET indexed_version = ?
+        WHERE scope = ? AND conversation = ?
+        """,
+        (current_version, scope, conversation),
+      )
+      return
+    existing = {
+      row["id"]: (row["source_mtime_ns"], row["source_size"])
+      for row in connection.execute(
+        """
+        SELECT id, source_mtime_ns, source_size FROM messages
         WHERE scope = ? AND conversation = ?
         """,
         (scope, conversation),
-      ).fetchone()
-      if not dirty and state is not None and int(state["indexed_version"]) == current_version:
-        return
-      coverage = connection.execute(
-        "SELECT covered_from, covered_through FROM history_coverage WHERE singleton = 1"
-      ).fetchone()
-      if (
-        not dirty and state is not None and coverage is not None
-        and current_version >= int(state["indexed_version"])
-        and int(state["indexed_version"]) >= int(coverage["covered_from"]) - 1
-        and int(coverage["covered_through"]) == current_version
-      ):
-        connection.execute(
-          """
-          UPDATE conversation_state SET indexed_version = ?
-          WHERE scope = ? AND conversation = ?
-          """,
-          (current_version, scope, conversation),
-        )
-        return
-      existing = {
-        row["id"]: (row["source_mtime_ns"], row["source_size"])
-        for row in connection.execute(
-          """
-          SELECT id, source_mtime_ns, source_size FROM messages
-          WHERE scope = ? AND conversation = ?
-          """,
-          (scope, conversation),
-        )
-      }
-      seen = set()
-      invalid = set()
-      for path in messages_dir.glob("*.json") if messages_dir.is_dir() else ():
-        message_id = path.stem
-        seen.add(message_id)
-        try:
-          stat = path.stat()
-        except OSError:
-          continue
-        if existing.get(message_id) == (stat.st_mtime_ns, stat.st_size):
-          continue
-        try:
-          record = json.loads(path.read_text())
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-          invalid.add(message_id)
-          continue
-        if not isinstance(record, dict) or record.get("id") != message_id:
-          invalid.add(message_id)
-          continue
-        try:
-          _upsert(connection, _values(scope, conversation, record, path))
-        except OSError:
-          invalid.add(message_id)
-      stale = (set(existing) - seen) | invalid
-      connection.executemany(
-        """
-        DELETE FROM messages
-        WHERE scope = ? AND conversation = ? AND id = ?
-        """,
-        ((scope, conversation, message_id) for message_id in stale),
       )
-      connection.execute(
-        """
-        INSERT INTO conversation_state(scope, conversation, indexed_version)
-        VALUES (?, ?, ?)
-        ON CONFLICT(scope, conversation) DO UPDATE SET
-          indexed_version=excluded.indexed_version
-        """,
-        (scope, conversation, current_version),
-      )
-    _finish_message_mutation(scope, conversation)
+    }
+    seen = set()
+    invalid = set()
+    for path in messages_dir.glob("*.json") if messages_dir.is_dir() else ():
+      message_id = path.stem
+      seen.add(message_id)
+      try:
+        stat = path.stat()
+      except OSError:
+        continue
+      if existing.get(message_id) == (stat.st_mtime_ns, stat.st_size):
+        continue
+      try:
+        record = json.loads(path.read_text())
+      except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        invalid.add(message_id)
+        continue
+      if not isinstance(record, dict) or record.get("id") != message_id:
+        invalid.add(message_id)
+        continue
+      try:
+        _upsert(connection, _values(scope, conversation, record, path))
+      except OSError:
+        invalid.add(message_id)
+    stale = (set(existing) - seen) | invalid
+    connection.executemany(
+      """
+      DELETE FROM messages
+      WHERE scope = ? AND conversation = ? AND id = ?
+      """,
+      ((scope, conversation, message_id) for message_id in stale),
+    )
+    connection.execute(
+      """
+      INSERT INTO conversation_state(scope, conversation, indexed_version)
+      VALUES (?, ?, ?)
+      ON CONFLICT(scope, conversation) DO UPDATE SET
+        indexed_version=excluded.indexed_version
+      """,
+      (scope, conversation, current_version),
+    )
+  _finish_message_mutation(scope, conversation)
 
 
 def read_page(
@@ -421,9 +457,22 @@ async def load_page(
   app_id: int, scope: str, conversation: str, messages_dir: Path, *,
   cursor: str | None = None, limit: int = DEFAULT_PAGE_SIZE,
 ) -> dict:
-  """Serve an indexed page, falling back to durable JSON on index failure."""
+  """Serve an indexed page, falling back to durable JSON on index failure.
+
+  Serving the newest page also republishes it for first paint, which covers
+  conversations whose messages predate _publish_latest_page.
+  """
+  if scope not in _SCOPES:
+    raise ValueError("Unknown message scope.")
   try:
-    await ensure_conversation(app_id, scope, conversation, messages_dir)
-    return read_page(scope, conversation, cursor=cursor, limit=limit)
+    async with fs_locks.app_storage_lock(app_id):
+      _reconcile_conversation(scope, conversation, messages_dir)
+      page = read_page(scope, conversation, cursor=cursor, limit=limit)
+      if cursor is None and limit == DEFAULT_PAGE_SIZE:
+        try:
+          _write_latest_page(scope, conversation, page)
+        except (OSError, ValueError):
+          pass
+    return page
   except sqlite3.Error:
     return _read_file_page(messages_dir, cursor=cursor, limit=limit)

@@ -8,6 +8,7 @@ and immutable build provenance for the central host.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -19,11 +20,19 @@ from fastapi import FastAPI, HTTPException
 from common_protocol import (
   COMMUNITY_HOST, PROTOCOL, ActorVerifier, new_signing_key, signing_public_key,
 )
-from common_public import CommonPublicStore, create_public_router, send_board_activity
+from common_public import (
+  CommonPublicStore, create_public_router, refresh_member_avatar, send_board_activity,
+)
 from service_io import atomic_write
 
 
 SERVICE_NAME = "mobius-social"
+# Member avatar copies: a few refreshes at a time, a bounded sweep for copies
+# older than a day (including members who registered before copies existed).
+AVATAR_REFRESH_CONCURRENCY = 4
+AVATAR_SWEEP_FIRST_DELAY_S = 60
+AVATAR_SWEEP_INTERVAL_S = 15 * 60
+AVATAR_SWEEP_BATCH = 25
 DEVELOPMENT_REVISION = "development"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
@@ -69,8 +78,41 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     relays.add(relay)
     relay.add_done_callback(relays.discard)
 
+  refreshing: set[str] = set()
+  refresh_slots = asyncio.Semaphore(AVATAR_REFRESH_CONCURRENCY)
+
+  async def refresh_avatar(member_host):
+    try:
+      async with refresh_slots:
+        await refresh_member_avatar(store, member_host)
+    finally:
+      refreshing.discard(member_host)
+
+  def schedule_avatar_refresh(member_host):
+    # One refresh per member at a time; a burst of registrations coalesces.
+    if member_host in refreshing:
+      return
+    refreshing.add(member_host)
+    refresh = asyncio.create_task(refresh_avatar(member_host))
+    relays.add(refresh)
+    refresh.add_done_callback(relays.discard)
+
+  async def sweep_stale_avatars():
+    await asyncio.sleep(AVATAR_SWEEP_FIRST_DELAY_S)
+    while True:
+      for member_host in await asyncio.to_thread(
+        store.members_due_for_avatar_check, AVATAR_SWEEP_BATCH,
+      ):
+        schedule_avatar_refresh(member_host)
+      await asyncio.sleep(AVATAR_SWEEP_INTERVAL_S)
+
+  async def on_register(member_host):
+    # Registration answers at once; the avatar copy follows in the background.
+    schedule_avatar_refresh(member_host)
+
   public_router, _ = create_public_router(
     store, verifier, prefix="/api/common", on_activity=on_activity,
+    on_register=on_register,
   )
 
   @asynccontextmanager
@@ -78,10 +120,14 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     store.initialize()
     application.state.signing_key = load_signing_key(configured)
     application.state.initialized = True
+    sweep = asyncio.create_task(sweep_stale_avatars())
     try:
       yield
     finally:
       application.state.initialized = False
+      sweep.cancel()
+      with contextlib.suppress(asyncio.CancelledError):
+        await sweep
 
   application = FastAPI(
     docs_url=None,
