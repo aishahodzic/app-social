@@ -252,7 +252,8 @@ export default function Board({
   hasEarlier, onLoadEarlier,
   composing, setComposing, canInteract, participationIntent, intentState,
   participationBusy, onRetryIntent, onRequestParticipation,
-  onCompleteParticipation, onPostConfirmed, emojiReactions = false, onThreadOpenChange,
+  onCompleteParticipation, onDiscardParticipation, onPostConfirmed, emojiReactions = false,
+  onThreadOpenChange,
 }) {
   const [draft, setDraft] = useState('')
   const [posting, setPosting] = useState(false)
@@ -575,6 +576,12 @@ export default function Board({
 
   async function continueParticipation(kind, values) {
     if (handoffBusy || participationBusy) return
+    // The board paints from cache before the profile arrives. Until it does,
+    // a member's tap must not be saved as a draft and sent to sign-up.
+    if (!me) {
+      showToast('Social is still loading your profile. Try again in a moment.', 'error')
+      return
+    }
     const intent = createParticipationIntent(kind, values)
     if (!intent) {
       showToast('This draft couldn’t be prepared. Check it and try again.', 'error')
@@ -857,12 +864,18 @@ export default function Board({
               ? 'Nothing was shared automatically. Review the action when you’re ready.'
               : 'Nothing was shared. Continue with your account when you’re ready.'}</span>
           </div>
-          <button className="cn-btn cn-btn-secondary" onClick={resumeParticipation}
-                  disabled={handoffBusy || participationBusy}>
-            {handoffBusy || participationBusy
-              ? 'Please wait…'
-              : participationActionLabel(participationStep(me), participationIntent.kind)}
-          </button>
+          <div className="cn-intent-actions">
+            <button className="cn-btn cn-btn-ghost" onClick={onDiscardParticipation}
+                    disabled={handoffBusy || participationBusy}>
+              Discard
+            </button>
+            <button className="cn-btn cn-btn-secondary" onClick={resumeParticipation}
+                    disabled={handoffBusy || participationBusy}>
+              {handoffBusy || participationBusy
+                ? 'Please wait…'
+                : participationActionLabel(participationStep(me), participationIntent.kind)}
+            </button>
+          </div>
         </section>
       )}
       {feedState === 'loading' && (

@@ -9,7 +9,7 @@ import {
 } from '../api.js'
 import { Avatar } from './Board.jsx'
 import MessageBubble, { ReplyTarget, replyTargetFor } from './MessageBubble.jsx'
-import MessageInput from './MessageInput.jsx'
+import MessageInput, { keepMessageFocus } from './MessageInput.jsx'
 import { prepareImage, SelectedImageStrip } from './Media.jsx'
 import {
   addUnseenMessages, isDefinitePrecommitRejection, reconcileLatestPage,
@@ -246,7 +246,7 @@ export default function Thread({
       const rejectedBeforeSave = isDefinitePrecommitRejection(error)
       if (rejectedBeforeSave) {
         updateMessages((prior) => (prior || []).filter((message) => message.id !== messageId))
-        setDraft(text)
+        setDraft((current) => (current.trim() ? `${text}\n${current}` : text))
         setSelectedImage(image)
         setReplyTarget(reply)
         showToast(
@@ -426,8 +426,8 @@ export default function Thread({
             {processingImage ? <span className="cn-spinner" /> : <ImageSquare aria-hidden="true" />}
           </button>
           <MessageInput inputRef={inputRef} value={draft} onChange={setDraft}
-                        disabled={sending || processingImage} />
-          <button className="cn-send" type="submit"
+                        disabled={processingImage} />
+          <button className="cn-send" type="submit" onMouseDown={keepMessageFocus}
                   disabled={sending || processingImage || (!draft.trim() && !selectedImage)} aria-label="Send">
             <ArrowUp />
           </button>

@@ -21,14 +21,15 @@ from common_protocol import (
   COMMUNITY_HOST, PROTOCOL, ActorVerifier, new_signing_key, signing_public_key,
 )
 from common_public import (
-  CommonPublicStore, create_public_router, refresh_member_avatar, send_board_activity,
+  CommonPublicStore, create_public_router, refresh_member_profile, send_board_activity,
 )
 from service_io import atomic_write
 
 
 SERVICE_NAME = "mobius-social"
-# Member avatar copies: a few refreshes at a time, a bounded sweep for copies
-# older than a day (including members who registered before copies existed).
+# Member handles and avatar copies: a few refreshes at a time, a bounded sweep
+# for members checked more than a day ago (including members who registered
+# before copies existed, or before they chose a handle).
 AVATAR_REFRESH_CONCURRENCY = 4
 AVATAR_SWEEP_FIRST_DELAY_S = 60
 AVATAR_SWEEP_INTERVAL_S = 15 * 60
@@ -84,7 +85,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
   async def refresh_avatar(member_host):
     try:
       async with refresh_slots:
-        await refresh_member_avatar(store, member_host)
+        await refresh_member_profile(store, verifier, member_host)
     finally:
       refreshing.discard(member_host)
 
@@ -107,7 +108,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
       await asyncio.sleep(AVATAR_SWEEP_INTERVAL_S)
 
   async def on_register(member_host):
-    # Registration answers at once; the avatar copy follows in the background.
+    # Registration answers at once; the handle check and avatar copy follow in
+    # the background.
     schedule_avatar_refresh(member_host)
 
   public_router, _ = create_public_router(

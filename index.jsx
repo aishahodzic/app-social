@@ -13,7 +13,7 @@ import { Lightbox } from './ui/Media.jsx'
 import { joinGlobalCommunity, checkGlobalRegistration } from './community.js'
 import {
   accountHandoff, clearParticipationIntent, loadParticipationIntent,
-  participationActionLabel, participationIntentMatches, participationStep,
+  participationActionLabel, participationIntentFulfilledBy, participationStep,
   saveParticipationIntent,
 } from './participation.js'
 import { reconcileFeedPage } from './reconciliation.js'
@@ -35,7 +35,7 @@ function ParticipationNotice({ me, state, busy, onJoin, onAccount, onCheck }) {
     )
   }
 
-  if (me?.joined && me?.name) {
+  if (me?.joined && me?.handle) {
     if (!me.registration) return null
     if (me.registration === 'registered') return null
     const missing = me.registration === 'missing'
@@ -54,28 +54,31 @@ function ParticipationNotice({ me, state, busy, onJoin, onAccount, onCheck }) {
     )
   }
 
-  const connected = me?.connected
   const step = participationStep(me)
+  const canJoin = step === 'join'
   return (
     <section className="cn-welcome" aria-labelledby="cn-welcome-title">
       <span className="cn-welcome-mark" aria-hidden="true"><Globe /></span>
       <div className="cn-welcome-copy">
         <h2 id="cn-welcome-title">
-          {connected ? `Browse as @${me.handle}` : 'Browse without signing in'}
+          {canJoin ? `Browse as @${me.handle}`
+            : step === 'username' ? 'Choose a username to join' : 'Browse without signing in'}
         </h2>
         <p>
-          {connected
+          {canJoin
             ? 'The board and people directory are public. Join only when you want to post, reply, react or message.'
-            : 'The board and people directory are open. Use Möbius · You only when you want to participate.'}
+            : step === 'username'
+              ? 'People see your username on everything you post, reply or send. Pick one in Möbius · You, then come back to join.'
+              : 'The board and people directory are open. Use Möbius · You only when you want to participate.'}
         </p>
-        {connected && (
+        {canJoin && (
           <span className="cn-welcome-privacy">
             Joining shares your handle and profile picture. Your name and email stay private.
           </span>
         )}
       </div>
       <div className="cn-welcome-actions">
-        {connected ? (
+        {canJoin ? (
           <button className="cn-btn cn-btn-primary" onClick={onJoin} disabled={busy}>
             {busy ? 'Joining…' : `Join as @${me.handle}`}
           </button>
@@ -543,13 +546,22 @@ export default function App({ appId, token }) {
   }
 
   async function completeParticipationIntent(completedIntent) {
-    if (!participationIntentMatches(participationIntent, completedIntent)) return
+    if (!participationIntentFulfilledBy(participationIntent, completedIntent)) return
     try {
       await clearParticipationIntent(window.mobius?.storage, participationIntent)
       setParticipationIntent(await loadParticipationIntent(window.mobius?.storage))
     } catch {
       // The explicit action already succeeded. A stale saved draft remains
       // harmless because Social never auto-submits restored intent.
+    }
+  }
+
+  async function discardParticipationIntent() {
+    try {
+      await clearParticipationIntent(window.mobius?.storage, participationIntent)
+      setParticipationIntent(await loadParticipationIntent(window.mobius?.storage))
+    } catch {
+      showToast('Social couldn’t discard this draft. Try again.', 'error')
     }
   }
 
@@ -562,7 +574,7 @@ export default function App({ appId, token }) {
   const unread =
     activeConversations.reduce((sum, c) => sum + (c.unread || 0), 0) +
     activeGroups.reduce((sum, g) => sum + (g.unread || 0), 0)
-  const canParticipate = Boolean(me?.joined && me?.name)
+  const canParticipate = participationStep(me) === 'ready'
 
   // ── render ────────────────────────────────────────────────────────────────
   if (thread) {
@@ -657,6 +669,7 @@ export default function App({ appId, token }) {
                  onRetryIntent={loadSavedParticipationIntent}
                  onRequestParticipation={requestParticipation}
                  onCompleteParticipation={completeParticipationIntent}
+                 onDiscardParticipation={discardParticipationIntent}
                  onPostConfirmed={acceptPublishedPost}
                  onOpenPerson={(host) => { setProfileRequest(host); setTab('people') }} showToast={showToast}
                  onMessageUser={(host, name) => openThread(host, name)}

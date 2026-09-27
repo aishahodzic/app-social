@@ -42,6 +42,18 @@ def _signed(key: Ed25519PrivateKey, body: dict) -> dict:
   return {**body, "sig": base64.b64encode(key.sign(canonical(body))).decode()}
 
 
+class _ActorCards:
+  """Serve each member's live actor card (None: the member is unreachable)."""
+
+  def __init__(self, handles: dict | None = None):
+    self.handles = handles or {}
+
+  async def fetch_actor(self, host: str, *, force: bool = False) -> dict:
+    if self.handles.get(host) is None:
+      raise common_public.HTTPException(status_code=502, detail="Peer could not be reached.")
+    return {"protocol": "common/0", "host": host, "handle": self.handles[host]}
+
+
 class CommunityHostTests(unittest.TestCase):
   def test_health_version_and_public_prefix_share_one_app(self):
     revision = "a" * 40
@@ -173,12 +185,12 @@ class CommunityHostTests(unittest.TestCase):
         self.assertEqual(revalidated.content, b"")
         self.assertEqual(client.get(url, headers={"If-None-Match": '"other"'}).status_code, 200)
 
-  def test_registration_refreshes_the_member_avatar_without_waiting_for_it(self):
+  def test_registration_refreshes_the_member_profile_without_waiting_for_it(self):
     with tempfile.TemporaryDirectory() as data_dir:
       peer = _peer(Path(data_dir), "member.example")
       refreshed = AsyncMock()
       with (
-        patch.object(community_host, "refresh_member_avatar", new=refreshed),
+        patch.object(community_host, "refresh_member_profile", new=refreshed),
         TestClient(community_host.create_app(data_dir)) as client,
       ):
         response = client.post("/api/common/directory", json=_signed(peer, {
@@ -189,7 +201,7 @@ class CommunityHostTests(unittest.TestCase):
         while not refreshed.await_count and time.monotonic() < deadline:
           time.sleep(0.02)
     self.assertEqual(response.json(), {"status": "registered"})
-    self.assertEqual(refreshed.await_args.args[1], "member.example")
+    self.assertEqual(refreshed.await_args.args[2], "member.example")
 
   def test_member_avatars_are_content_addressed_and_follow_changes(self):
     def png(color):
@@ -209,7 +221,7 @@ class CommunityHostTests(unittest.TestCase):
       with patch.object(common_public, "federation_request", new=AsyncMock(
         return_value=reply(200, png("#336699")),
       )):
-        asyncio.run(common_public.refresh_member_avatar(store, "member.example"))
+        asyncio.run(common_public.refresh_member_profile(store, _ActorCards(), "member.example"))
       first = store.member_avatars()["member.example"]
       stored = store.member_avatar_file(f"{first}.webp")
       self.assertEqual(hashlib.sha256(stored.read_bytes()).hexdigest(), first)
@@ -234,7 +246,7 @@ class CommunityHostTests(unittest.TestCase):
       with patch.object(common_public, "federation_request", new=AsyncMock(
         return_value=reply(200, png("#993366")),
       )):
-        asyncio.run(common_public.refresh_member_avatar(store, "member.example"))
+        asyncio.run(common_public.refresh_member_profile(store, _ActorCards(), "member.example"))
       second = store.member_avatars()["member.example"]
       self.assertNotEqual(second, first)
       self.assertIsNone(store.member_avatar_file(f"{first}.webp"))
@@ -243,14 +255,14 @@ class CommunityHostTests(unittest.TestCase):
       with patch.object(common_public, "federation_request", new=AsyncMock(
         side_effect=httpx.ConnectError("down"),
       )):
-        asyncio.run(common_public.refresh_member_avatar(store, "member.example"))
+        asyncio.run(common_public.refresh_member_profile(store, _ActorCards(), "member.example"))
       self.assertEqual(store.member_avatars()["member.example"], second)
       self.assertEqual(store.members_due_for_avatar_check(10), [])
       # A removed avatar clears the copy.
       with patch.object(common_public, "federation_request", new=AsyncMock(
         return_value=reply(404),
       )):
-        asyncio.run(common_public.refresh_member_avatar(store, "member.example"))
+        asyncio.run(common_public.refresh_member_profile(store, _ActorCards(), "member.example"))
       self.assertNotIn("member.example", store.member_avatars())
       self.assertIsNone(store.member_avatar_file(f"{second}.webp"))
 
@@ -301,6 +313,78 @@ class CommunityHostTests(unittest.TestCase):
     self.assertEqual(post["avatar"], digest(b"author-rendition"))
     self.assertEqual(post["reply_authors"][0]["avatar"], digest(b"replier-rendition"))
     self.assertEqual(replies[0]["avatar"], digest(b"replier-rendition"))
+
+  def test_board_names_authors_by_their_current_handle(self):
+    # Posts made before usernames were required kept an empty handle. Once the
+    # host re-reads the author's actor card, every row names them.
+    with tempfile.TemporaryDirectory() as data_dir:
+      store = common_public.CommonPublicStore(data_dir)
+      store.register("author.example", "", "")
+      store.register("replier.example", "", "")
+      post_id = str(uuid.uuid4())
+      store.store_post({
+        "id": post_id, "host": "author.example", "handle": "", "text": "Hello",
+        "created_at": time.time(), "replies": [],
+      }, None, None, None)
+      store.add_reply(post_id, str(uuid.uuid4()), "replier.example", "", "Hi", time.time())
+      with TestClient(community_host.create_app(data_dir)) as client:
+        self.assertEqual(client.get("/api/common/board").json()["posts"][0]["handle"], "")
+
+        cards = _ActorCards({"author.example": "ada", "replier.example": "lin"})
+        with patch.object(common_public, "federation_request", new=AsyncMock(
+          side_effect=httpx.ConnectError("no avatar"),
+        )):
+          for host in ("author.example", "replier.example"):
+            asyncio.run(common_public.refresh_member_profile(store, cards, host))
+        # An unreachable member keeps the handle the directory already has.
+        asyncio.run(common_public.refresh_member_profile(store, _ActorCards(), "author.example"))
+
+        post = client.get("/api/common/board").json()["posts"][0]
+        replies = client.get(f"/api/common/board/{post_id}/replies").json()["replies"]
+        people = client.get("/api/common/directory", params={"q": "ada"}).json()["users"]
+    self.assertEqual(post["handle"], "ada")
+    self.assertEqual(post["reply_authors"][0]["handle"], "lin")
+    self.assertEqual(replies[0]["handle"], "lin")
+    self.assertEqual([person["host"] for person in people], ["author.example"])
+
+  def test_members_without_a_username_cannot_join_or_post(self):
+    with tempfile.TemporaryDirectory() as data_dir:
+      root = Path(data_dir)
+      member = _peer(root, "member.example")
+      cache = root / "common" / "peers" / "member.example.json"
+      card = json.loads(cache.read_text())
+      card["actor"]["handle"] = ""
+      cache.write_text(json.dumps(card))
+      unnamed = dict(card["actor"])
+      post = lambda: _signed(member, {
+        "v": 0, "type": "board_post", "id": str(uuid.uuid4()),
+        "from": "member.example", "text": "Hello", "sent_at": time.time(),
+      })
+      with (
+        patch.object(community_host, "refresh_member_profile", new=AsyncMock()),
+        TestClient(community_host.create_app(data_dir)) as client,
+      ):
+        with patch.object(
+          common_public.ActorVerifier, "fetch_actor",
+          new=AsyncMock(side_effect=[unnamed, unnamed, unnamed, unnamed]),
+        ):
+          refused = client.post("/api/common/board", json=post())
+          unlisted = client.post("/api/common/directory", json=_signed(member, {
+            "v": 0, "type": "register", "from": "member.example",
+            "handle": "", "bio": "", "sent_at": time.time(),
+          }))
+        # A username chosen after the host cached the card is picked up at once.
+        with patch.object(
+          common_public.ActorVerifier, "fetch_actor",
+          new=AsyncMock(side_effect=[unnamed, {**unnamed, "handle": "member"}]),
+        ):
+          posted = client.post("/api/common/board", json=post())
+        board = client.get("/api/common/board").json()["posts"]
+    self.assertEqual(refused.status_code, 409)
+    self.assertIn("username", refused.json()["detail"])
+    self.assertEqual(unlisted.status_code, 409)
+    self.assertEqual(posted.json()["status"], "posted")
+    self.assertEqual([item["handle"] for item in board], ["member"])
 
   def test_invalid_baked_revision_fails_closed(self):
     with patch.dict(os.environ, {"SOCIAL_SOURCE_SHA": "main"}, clear=False):

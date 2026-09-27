@@ -75,7 +75,7 @@ from common_protocol import (
   MAX_ATTACHMENT_BYTES, MAX_AVATAR_BYTES, MAX_BIO_CHARS,
   COMMUNITY_HOST, MAX_BOARD_ATTACHMENTS as _MAX_BOARD_ATTACHMENTS,
   MAX_ENVELOPE_BYTES, MAX_NAME_CHARS, MAX_POST_TEXT_CHARS, MAX_REPLY_TEXT_CHARS,
-  OUTBOUND_TIMEOUT_S, PROTOCOL, PUBLIC_SERVICE_PATH, ActorVerifier,
+  NEEDS_USERNAME, OUTBOUND_TIMEOUT_S, PROTOCOL, PUBLIC_SERVICE_PATH, ActorVerifier,
   canonical as _canonical, peer_service_url as _peer_service_url,
   post_signed_envelope as _post_signed_envelope,
   new_signing_key, read_envelope as _read_envelope, sign as _sign,
@@ -1286,6 +1286,7 @@ async def join_community(
         "Möbius · You first."
       ),
     )
+  _require_username(identity)
   identity["joined_at"] = identity.get("joined_at") or time.time()
   _save_identity(identity)
   status = await _register_with_community_host(identity)
@@ -1332,9 +1333,24 @@ async def _register_with_community_host(identity: dict) -> str:
   return "registered"
 
 
+def _require_username(identity: dict) -> None:
+  """Everything public in Social is shown by handle, so taking part needs one."""
+  if not identity.get("handle"):
+    raise HTTPException(status_code=409, detail=NEEDS_USERNAME)
+
+
+def _refused_for_username(response: httpx.Response) -> bool:
+  try:
+    return response.status_code == 409 and response.json().get("detail") == NEEDS_USERNAME
+  except (ValueError, AttributeError):
+    return False
+
+
 def _community_write_error(exc: Exception, action: str) -> str:
   """Describe a reached host separately from a transport failure."""
   if isinstance(exc, httpx.HTTPStatusError):
+    if _refused_for_username(exc.response):
+      return NEEDS_USERNAME
     if exc.response.status_code == 403:
       return "The community host could not verify this Social identity. Try again."
     return f"The community host rejected the {action}. Try again."
@@ -1528,6 +1544,7 @@ async def publish_post(
     text, first, "Post text is invalid.", MAX_POST_TEXT_CHARS,
   )
   identity = _load_identity()
+  _require_username(identity)
   envelope = {
     "v": 0,
     "type": "board_post",
@@ -1770,6 +1787,7 @@ async def _react_to_post(post_id_value, emoji, db, principal):
   if emoji not in BOARD_REACTION_EMOJIS:
     raise HTTPException(status_code=400, detail="Reaction is not supported.")
   identity = _load_identity()
+  _require_username(identity)
   host = COMMUNITY_HOST
   envelope = {
     "v": 0,
@@ -1811,6 +1829,7 @@ async def reply_to_post(
   if not text or len(text) > MAX_REPLY_TEXT_CHARS:
     raise HTTPException(status_code=400, detail="Reply text is invalid.")
   identity = _load_identity()
+  _require_username(identity)
   host = COMMUNITY_HOST
   reply_id = str(uuid.uuid4())
   sent_at = time.time()

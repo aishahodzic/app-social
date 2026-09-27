@@ -818,6 +818,7 @@ export const CSS = `
 .cn-intent-notice span { margin-top: 3px; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
 .cn-intent-notice .cn-btn { flex: 0 0 auto; }
 .cn-intent-notice.is-error { color: var(--danger); }
+.cn-intent-actions { display: flex; flex: 0 0 auto; gap: 6px; }
 
 /* mobius-ui:Sheet v1 — keep in sync; library candidate. Diverge below the marker only. */
 .cn-scrim {
@@ -1066,6 +1067,7 @@ export const CSS = `
   .cn-welcome-actions .cn-btn { flex: 1 1 auto; }
   .cn-intent-notice { align-items: stretch; flex-direction: column; }
   .cn-intent-notice .cn-btn { width: 100%; }
+  .cn-intent-actions .cn-btn { flex: 1 1 0; width: auto; }
   .cn-reply-composer.is-gated input { flex-basis: 100%; }
   .cn-reply-account { width: 100%; }
   .cn-profile-preview { grid-template-columns: 1fr; }
