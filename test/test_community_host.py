@@ -353,35 +353,32 @@ class CommunityHostTests(unittest.TestCase):
       member = _peer(root, "member.example")
       cache = root / "common" / "peers" / "member.example.json"
       card = json.loads(cache.read_text())
-      card["actor"]["handle"] = ""
-      cache.write_text(json.dumps(card))
-      unnamed = dict(card["actor"])
+
+      def cached_handle(handle):
+        card["actor"]["handle"] = handle
+        cache.write_text(json.dumps(card))
+
       post = lambda: _signed(member, {
         "v": 0, "type": "board_post", "id": str(uuid.uuid4()),
         "from": "member.example", "text": "Hello", "sent_at": time.time(),
       })
+      cached_handle("")
       with (
         patch.object(community_host, "refresh_member_profile", new=AsyncMock()),
         TestClient(community_host.create_app(data_dir)) as client,
       ):
-        with patch.object(
-          common_public.ActorVerifier, "fetch_actor",
-          new=AsyncMock(side_effect=[unnamed, unnamed, unnamed, unnamed]),
-        ):
-          refused = client.post("/api/common/board", json=post())
-          unlisted = client.post("/api/common/directory", json=_signed(member, {
-            "v": 0, "type": "register", "from": "member.example",
-            "handle": "", "bio": "", "sent_at": time.time(),
-          }))
-        # A username chosen after the host cached the card is picked up at once.
-        with patch.object(
-          common_public.ActorVerifier, "fetch_actor",
-          new=AsyncMock(side_effect=[unnamed, {**unnamed, "handle": "member"}]),
-        ):
-          posted = client.post("/api/common/board", json=post())
+        refused = client.post("/api/common/board", json=post())
+        unlisted = client.post("/api/common/directory", json=_signed(member, {
+          "v": 0, "type": "register", "from": "member.example",
+          "handle": "", "bio": "", "sent_at": time.time(),
+        }))
+        # Re-registering with a new handle re-reads the card; once it has
+        # the handle, the same member can post under it.
+        cached_handle("member")
+        posted = client.post("/api/common/board", json=post())
         board = client.get("/api/common/board").json()["posts"]
     self.assertEqual(refused.status_code, 409)
-    self.assertIn("username", refused.json()["detail"])
+    self.assertEqual(refused.json()["detail"], common_public.NEEDS_USERNAME)
     self.assertEqual(unlisted.status_code, 409)
     self.assertEqual(posted.json()["status"], "posted")
     self.assertEqual([item["handle"] for item in board], ["member"])

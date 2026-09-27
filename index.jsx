@@ -13,7 +13,7 @@ import { Lightbox } from './ui/Media.jsx'
 import { joinGlobalCommunity, checkGlobalRegistration } from './community.js'
 import {
   accountHandoff, clearParticipationIntent, loadParticipationIntent,
-  participationActionLabel, participationIntentFulfilledBy, participationStep,
+  participationActionLabel, participationIntentMatches, participationStep,
   saveParticipationIntent,
 } from './participation.js'
 import { reconcileFeedPage } from './reconciliation.js'
@@ -546,7 +546,7 @@ export default function App({ appId, token }) {
   }
 
   async function completeParticipationIntent(completedIntent) {
-    if (!participationIntentFulfilledBy(participationIntent, completedIntent)) return
+    if (!participationIntentMatches(participationIntent, completedIntent)) return
     try {
       await clearParticipationIntent(window.mobius?.storage, participationIntent)
       setParticipationIntent(await loadParticipationIntent(window.mobius?.storage))

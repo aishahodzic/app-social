@@ -170,14 +170,8 @@ class FederationTransportTests(unittest.IsolatedAsyncioTestCase):
     denied = httpx.HTTPStatusError(
       "denied", request=request, response=httpx.Response(403, request=request),
     )
-    unnamed = httpx.HTTPStatusError("unnamed", request=request, response=httpx.Response(
-      409, request=request,
-      json={"detail": social_routes.NEEDS_USERNAME},
-    ))
     self.assertIn("rejected", social_routes._community_write_error(rejected, "reply"))
-    self.assertEqual(
-      social_routes._community_write_error(unnamed, "reply"), social_routes.NEEDS_USERNAME,
-    )
+
     self.assertIn("verify", social_routes._community_write_error(denied, "reply"))
     self.assertIn(
       "too long",

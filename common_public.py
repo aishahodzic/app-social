@@ -1252,21 +1252,15 @@ async def send_board_activity(
 async def verify_named_member(verifier: ActorVerifier, envelope: dict) -> dict:
   """Verify a public write whose author must be named by a handle.
 
-  Everything on the board and in the directory is shown by handle, so a
-  member without one cannot join or take part. The verifier's actor cache can
-  predate a handle chosen minutes ago, so an unnamed card is re-read once
-  before the write is refused.
+  Everything on the board and in the directory is shown by handle, so a member
+  without one cannot join or take part. A member who has just chosen one
+  re-registers, and registration re-reads their actor card, so the cached card
+  catches up without a second fetch here.
   """
   actor = await verifier.verify_envelope(envelope)
-  if actor.get("handle"):
-    return actor
-  try:
-    current = await verifier.fetch_actor(envelope["from"], force=True)
-  except HTTPException:
-    current = actor
-  if current.get("handle") and current.get("public_key") == actor.get("public_key"):
-    return current
-  raise HTTPException(status_code=409, detail=NEEDS_USERNAME)
+  if not actor.get("handle"):
+    raise HTTPException(status_code=409, detail=NEEDS_USERNAME)
+  return actor
 
 
 def create_public_router(
@@ -1292,11 +1286,10 @@ def create_public_router(
     envelope = await read_envelope(request)
     if envelope.get("v") != 0 or envelope.get("type") != "register":
       raise HTTPException(status_code=400, detail="Unsupported envelope type.")
-    if envelope.get("handle"):
-      actor = await verifier.verify_envelope(envelope)
-    else:
-      actor = await verify_named_member(verifier, envelope)
-    handle = envelope.get("handle") or actor["handle"]
+    actor = await verifier.verify_envelope(envelope)
+    handle = envelope.get("handle") or actor.get("handle") or ""
+    if not handle:
+      raise HTTPException(status_code=409, detail=NEEDS_USERNAME)
     bio = envelope.get("bio") or ""
     if (
       not isinstance(handle, str) or len(handle) > MAX_NAME_CHARS

@@ -6,7 +6,7 @@ import { setToken, postReply } from '../api.js'
 import {
   PARTICIPATION_INTENT_PATH, accountHandoff, clearParticipationIntent,
   createParticipationIntent, loadParticipationIntent, participationActionLabel, participationStep,
-  participationIntentFulfilledBy, participationIntentMatches, saveParticipationIntent,
+  participationIntentMatches, saveParticipationIntent,
 } from '../participation.js'
 
 const originalFetch = globalThis.fetch
@@ -99,21 +99,6 @@ test('posting a different draft cannot consume the preserved one', () => {
   assert.equal(participationIntentMatches(
     pending, createParticipationIntent('post', { text: 'Keep this' }),
   ), true)
-})
-
-test('reacting to the saved post with any emoji answers a saved reaction', () => {
-  const saved = createParticipationIntent('like', { postId: 'post-1', emoji: '❤️' })
-  assert.equal(participationIntentFulfilledBy(
-    saved, createParticipationIntent('like', { postId: 'post-1', emoji: '👍' }),
-  ), true)
-  assert.equal(participationIntentFulfilledBy(
-    saved, createParticipationIntent('like', { postId: 'post-2', emoji: '❤️' }),
-  ), false)
-  // Drafts with content still need the exact draft to be sent.
-  assert.equal(participationIntentFulfilledBy(
-    createParticipationIntent('post', { text: 'Keep this' }),
-    createParticipationIntent('post', { text: 'Something else' }),
-  ), false)
 })
 
 test('a tap before the profile loads is never saved as a sign-up draft', () => {

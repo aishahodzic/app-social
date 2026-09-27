@@ -81,16 +81,6 @@ export function participationIntentMatches(first, second) {
   return JSON.stringify(a) === JSON.stringify(b)
 }
 
-// A saved reaction is a reminder to react to one post. Reacting to that post
-// with any emoji answers it; a post or reply draft must be the one sent.
-export function participationIntentFulfilledBy(saved, completed) {
-  const a = parseParticipationIntent(saved)
-  const b = parseParticipationIntent(completed)
-  if (!a || !b) return false
-  if (a.kind === 'like' && b.kind === 'like') return a.post_id === b.post_id
-  return participationIntentMatches(a, b)
-}
-
 export async function loadParticipationIntent(storage) {
   if (!storage?.get) return null
   return parseParticipationIntent(await storage.get(PARTICIPATION_INTENT_PATH))

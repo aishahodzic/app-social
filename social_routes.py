@@ -1339,18 +1339,9 @@ def _require_username(identity: dict) -> None:
     raise HTTPException(status_code=409, detail=NEEDS_USERNAME)
 
 
-def _refused_for_username(response: httpx.Response) -> bool:
-  try:
-    return response.status_code == 409 and response.json().get("detail") == NEEDS_USERNAME
-  except (ValueError, AttributeError):
-    return False
-
-
 def _community_write_error(exc: Exception, action: str) -> str:
   """Describe a reached host separately from a transport failure."""
   if isinstance(exc, httpx.HTTPStatusError):
-    if _refused_for_username(exc.response):
-      return NEEDS_USERNAME
     if exc.response.status_code == 403:
       return "The community host could not verify this Social identity. Try again."
     return f"The community host rejected the {action}. Try again."
