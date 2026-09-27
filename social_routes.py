@@ -25,7 +25,8 @@ Public peer surface (no owner auth; envelope signatures are the authority):
   POST /api/app-services/social/inbox        deliver a signed DM
   GET|POST /api/app-services/social/directory  public directory
   GET|POST /api/app-services/social/board      public board
-  GET /api/app-services/social/board/media/{post_id}  hosted board image
+  GET /api/app-services/social/board/{media|thumbnail}/{post_id}[/{index}][.{type}]
+      hosted board image; links ending in the type are CDN-cacheable
   POST /api/app-services/social/board/reply    signed board reply
   GET /api/app-services/social/board/{post_id}/replies  hosted post replies
 
@@ -35,7 +36,8 @@ Owner surface (owner JWT or the Social app's scoped token):
   POST /api/services/social/send         sign + deliver a DM; store own copy
   POST /api/services/social/requests/dm/{host}/{decision}  accept/decline/block request
   POST /api/services/social/publish      sign + submit a board post to the community host
-  GET  /api/services/social/board-media/{post_id}  local/cached community board image
+  GET  /api/services/social/board-media/{post_id}[/{index}]?thumbnail=&mime=
+      local/cached community board image (mime: the type the post records)
   POST /api/services/social/reply        sign + submit a board reply to the community host
   GET  /api/services/social/feed         community host's board (local read when self)
   GET  /api/services/social/people       community host directory search
@@ -1588,11 +1590,22 @@ async def get_replies_for_owner(
     ) from exc
 
 
+def _board_media_path(
+  kind: str, post_id: str, index: int | None, extension: str | None,
+) -> str:
+  # A link that ends in the image's type can be served from the community
+  # site's CDN; without a known type the host still answers the bare link.
+  name = post_id if index is None else f"{post_id}/{index}"
+  return f"board/{kind}/{name}" + (f".{extension}" if extension else "")
+
+
 async def _serve_owner_board_media(
   host: str, post_id: str, index: int | None, thumbnail: bool = False,
+  recorded_mime: str | None = None,
 ):
   """Serve one community-board image (a gallery index or the first/legacy one),
-  caching remote hosts for 24 hours."""
+  caching remote hosts for 24 hours. ``recorded_mime`` is the type the post
+  records for a full image; the host keeps every thumbnail as WebP."""
 
   cache_dir = _peer_board_media_dir()
   base_stem = _peer_board_media_name(host, post_id)
@@ -1605,25 +1618,23 @@ async def _serve_owner_board_media(
     and time.time() - cached[0].stat().st_mtime < BOARD_MEDIA_CACHE_TTL_S
   ):
     return _serve_image(cached)
-  media_kind = "thumbnail" if thumbnail else "media"
   suffix = (
-    f"board/{media_kind}/{post_id}" if index is None
-    else f"board/{media_kind}/{post_id}/{index}"
+    _board_media_path("thumbnail", post_id, index, "webp") if thumbnail
+    else _board_media_path(
+      "media", post_id, index, _ATTACHMENT_MIME_EXT.get(recorded_mime),
+    )
   )
   try:
     try:
       mime, data = await _download_board_media(_peer_service_url(host, suffix))
     except Exception:
+      # A full image's typed link names what the host stored, so a miss means
+      # it is gone; only a thumbnail has something else to fall back to.
       if not thumbnail:
         raise
-      full_suffix = (
-        f"board/media/{post_id}" if index is None
-        else f"board/media/{post_id}/{index}"
+      mime, data = await _download_board_media(
+        _peer_service_url(host, _board_media_path("media", post_id, index, None))
       )
-      _source_mime, source = await _download_board_media(
-        _peer_service_url(host, full_suffix)
-      )
-      mime, data = _source_mime, source
     if thumbnail:
       # Peer bytes are untrusted even when served from a thumbnail route.
       # Re-encode after the header-size guard before caching or serving them.
@@ -1645,6 +1656,7 @@ async def _serve_owner_board_media(
 async def get_board_media_for_owner(
   post_id: str,
   thumbnail: bool = False,
+  mime: str | None = None,
   db: object = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
@@ -1653,7 +1665,7 @@ async def get_board_media_for_owner(
   if not _valid_id(post_id):
     raise HTTPException(status_code=400, detail="Post id is invalid.")
   return await _serve_owner_board_media(
-    COMMUNITY_HOST, post_id, None, thumbnail,
+    COMMUNITY_HOST, post_id, None, thumbnail, mime,
   )
 
 
@@ -1662,6 +1674,7 @@ async def get_board_media_index_for_owner(
   post_id: str,
   index: int,
   thumbnail: bool = False,
+  mime: str | None = None,
   db: object = Depends(get_db),
   principal: Principal = Depends(get_principal),
 ):
@@ -1672,7 +1685,7 @@ async def get_board_media_index_for_owner(
   if not 0 <= index < _MAX_BOARD_ATTACHMENTS:
     raise HTTPException(status_code=400, detail="Image index is invalid.")
   return await _serve_owner_board_media(
-    COMMUNITY_HOST, post_id, index, thumbnail,
+    COMMUNITY_HOST, post_id, index, thumbnail, mime,
   )
 
 

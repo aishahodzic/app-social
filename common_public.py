@@ -68,10 +68,14 @@ BOARD_REPLY_LIMIT = 200
 BOARD_LIKE_LIMIT = 2000
 DIRECTORY_LIMIT = 2000
 # A member avatar URL is its content hash, so it never changes. A board image
-# never changes either, but its post can be deleted or moderated, so shared
-# caches keep it for at most a day.
+# never changes either, but its post can be deleted or moderated: a browser may
+# keep what it already showed for a day, while shared caches such as the site's
+# CDN, which answer anyone, keep it for at most an hour.
 IMMUTABLE_PUBLIC = "public, max-age=31536000, immutable"
-BOARD_IMAGE_CACHE = "public, max-age=86400"
+BOARD_IMAGE_CACHE = "public, max-age=86400, s-maxage=3600"
+# A missing image may appear moments later (a post still being stored, an
+# avatar switched back), so no cache may hold on to its absence.
+NOT_FOUND_UNCACHED = {"Cache-Control": "no-store"}
 MEMBER_AVATAR_MAX_SIDE = 128
 MEMBER_AVATAR_MAX_PIXELS = 8_000_000
 # The host re-copies each member's avatar at least this often, so a member
@@ -522,7 +526,9 @@ class CommonPublicStore:
     cache_control: str = BOARD_IMAGE_CACHE,
   ) -> Response:
     if found is None:
-      raise HTTPException(status_code=404, detail="Board image not found.")
+      raise HTTPException(
+        status_code=404, detail="Board image not found.", headers=NOT_FOUND_UNCACHED,
+      )
     path, mime = found
     return immutable_file_response(path, mime, request, cache_control=cache_control)
 
@@ -737,6 +743,17 @@ class CommonPublicStore:
     except (OSError, ValueError, SyntaxError, Image.UnidentifiedImageError):
       return None
 
+  def _store_thumbnail(
+    self, post_id: str, index: int, original: bytes,
+    supplied: tuple[dict, bytes] | None,
+  ) -> None:
+    """Keep every thumbnail as WebP, the one type peers ask for by link."""
+    if supplied is not None and supplied[0]["mime"] == "image/webp":
+      atomic_write(self.board_thumbnail_dir() / f"{post_id}-{index}.webp", supplied[1])
+    else:
+      # Re-encode a small supplied thumbnail of another type, or make one.
+      self._write_board_thumbnail(post_id, index, supplied[1] if supplied else original)
+
   def _write_board_thumbnail(self, post_id: str, index: int, data: bytes) -> None:
     try:
       mime, thumbnail = image_thumbnail_bytes(data)
@@ -793,26 +810,16 @@ class CommonPublicStore:
         metas = []
         for index, (wire, data) in enumerate(attachments):
           atomic_write(self.board_media_index_path(post["id"], index, wire["mime"]), data)
-          if thumbnails and index < len(thumbnails):
-            thumb_wire, thumb_data = thumbnails[index]
-            target = self.board_thumbnail_dir() / (
-              f"{post['id']}-{index}.{ATTACHMENT_MIME_EXT[thumb_wire['mime']]}"
-            )
-            atomic_write(target, thumb_data)
-          else:
-            self._write_board_thumbnail(post["id"], index, data)
+          self._store_thumbnail(
+            post["id"], index, data, thumbnails[index] if thumbnails else None,
+          )
           metas.append({"mime": wire["mime"], "w": wire["w"], "h": wire["h"]})
         record["attachments"] = metas
         record["attachment"] = metas[0]
       elif attachment is not None:
         wire, data = attachment
         atomic_write(self.board_media_path(post["id"], wire["mime"]), data)
-        if thumbnails:
-          thumb_wire, thumb_data = thumbnails[0]
-          target = self.board_thumbnail_dir() / f"{post['id']}-0.{ATTACHMENT_MIME_EXT[thumb_wire['mime']]}"
-          atomic_write(target, thumb_data)
-        else:
-          self._write_board_thumbnail(post["id"], 0, data)
+        self._store_thumbnail(post["id"], 0, data, thumbnails[0] if thumbnails else None)
         record["attachment"] = {
           "mime": wire["mime"], "w": wire["w"], "h": wire["h"],
         }
@@ -1057,6 +1064,17 @@ def _encode_board_cursor(created_at: float, post_id: str) -> str:
   return base64.urlsafe_b64encode(payload).decode().rstrip("=")
 
 
+def split_image_name(name: str) -> tuple[str, str | None]:
+  """Split the optional file type off the last segment of a board image link.
+
+  The CDN in front of the community host keeps copies only of links that end
+  in a file type, so current instances ask for ``<post>/<index>.webp``; older
+  instances' type-less links keep working, uncached.
+  """
+  stem, dot, extension = name.rpartition(".")
+  return (stem, extension) if dot else (name, None)
+
+
 def _not_modified(request: Request, etag: str, modified: float) -> bool:
   candidates = request.headers.get("if-none-match")
   if candidates is not None:
@@ -1224,7 +1242,9 @@ def create_public_router(
   def get_member_avatar(name: str, request: Request):
     path = store.member_avatar_file(name)
     if path is None:
-      raise HTTPException(status_code=404, detail="Avatar not found.")
+      raise HTTPException(
+        status_code=404, detail="Avatar not found.", headers=NOT_FOUND_UNCACHED,
+      )
     return immutable_file_response(
       path, "image/webp", request, etag=f'"{path.stem}"',
     )
@@ -1237,33 +1257,52 @@ def create_public_router(
       viewer = None
     return read_board_page(store, limit, before, viewer)
 
-  @router.get("/board/media/{post_id}")
-  def get_board_media(post_id: str, request: Request):
+  # Each image route also answers with the file type appended to its last
+  # segment (see split_image_name).
+  def checked_post_id(post_id: str) -> str:
     if not valid_id(post_id):
       raise HTTPException(status_code=400, detail="Post id is invalid.")
-    return store.serve_image(store.board_image(post_id), request)
+    return post_id
 
-  @router.get("/board/media/{post_id}/{index}")
-  def get_board_media_at(post_id: str, index: int, request: Request):
-    if not valid_id(post_id):
-      raise HTTPException(status_code=400, detail="Post id is invalid.")
-    if not 0 <= index < MAX_BOARD_ATTACHMENTS:
+  def checked_index(text: str) -> int:
+    # One spelling per index ("5", never "05"), so shared caches keep one copy.
+    if (
+      not (text.isascii() and text.isdigit())
+      or str(int(text)) != text or int(text) >= MAX_BOARD_ATTACHMENTS
+    ):
       raise HTTPException(status_code=400, detail="Image index is invalid.")
-    return store.serve_image(store.board_image(post_id, index), request)
+    return int(text)
 
-  @router.get("/board/thumbnail/{post_id}")
-  def get_board_thumbnail(post_id: str, request: Request):
-    if not valid_id(post_id):
-      raise HTTPException(status_code=400, detail="Post id is invalid.")
-    return store.serve_image(store.board_thumbnail(post_id), request)
+  def serve_board_image(found, extension: str | None, request: Request):
+    # A link naming another type would store a second, mislabelled copy in
+    # shared caches.
+    if found is not None and extension is not None and found[0].suffix != f".{extension}":
+      found = None
+    return store.serve_image(found, request)
 
-  @router.get("/board/thumbnail/{post_id}/{index}")
-  def get_board_thumbnail_at(post_id: str, index: int, request: Request):
-    if not valid_id(post_id):
-      raise HTTPException(status_code=400, detail="Post id is invalid.")
-    if not 0 <= index < MAX_BOARD_ATTACHMENTS:
-      raise HTTPException(status_code=400, detail="Image index is invalid.")
-    return store.serve_image(store.board_thumbnail(post_id, index), request)
+  @router.get("/board/media/{name}")
+  def get_board_media(name: str, request: Request):
+    post_id, extension = split_image_name(name)
+    found = store.board_image(checked_post_id(post_id))
+    return serve_board_image(found, extension, request)
+
+  @router.get("/board/media/{post_id}/{name}")
+  def get_board_media_at(post_id: str, name: str, request: Request):
+    index, extension = split_image_name(name)
+    found = store.board_image(checked_post_id(post_id), checked_index(index))
+    return serve_board_image(found, extension, request)
+
+  @router.get("/board/thumbnail/{name}")
+  def get_board_thumbnail(name: str, request: Request):
+    post_id, extension = split_image_name(name)
+    found = store.board_thumbnail(checked_post_id(post_id))
+    return serve_board_image(found, extension, request)
+
+  @router.get("/board/thumbnail/{post_id}/{name}")
+  def get_board_thumbnail_at(post_id: str, name: str, request: Request):
+    index, extension = split_image_name(name)
+    found = store.board_thumbnail(checked_post_id(post_id), checked_index(index))
+    return serve_board_image(found, extension, request)
 
   @router.get("/board/{post_id}/replies")
   def get_board_replies(post_id: str):

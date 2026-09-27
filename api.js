@@ -142,13 +142,16 @@ export const getFeed = (before = null, { background = false } = {}) => {
     return result
   })
 }
-export const getBoardMedia = (postId, index, { thumbnail = false } = {}) =>
-  call(
-    index === undefined || index === null
-      ? `board-media/${encodeURIComponent(postId)}?thumbnail=${thumbnail ? 'true' : 'false'}`
-      : `board-media/${encodeURIComponent(postId)}/${index}?thumbnail=${thumbnail ? 'true' : 'false'}`,
-    {}, 'blob',
-  )
+// `mime` is the type the post records for a full image; it lets Social's
+// server ask the community host for the copy the site's CDN keeps.
+export const getBoardMedia = (postId, index, { thumbnail = false, mime } = {}) => {
+  const path = index === undefined || index === null
+    ? `board-media/${encodeURIComponent(postId)}`
+    : `board-media/${encodeURIComponent(postId)}/${index}`
+  const query = new URLSearchParams({ thumbnail: thumbnail ? 'true' : 'false' })
+  if (!thumbnail && mime) query.set('mime', mime)
+  return call(`${path}?${query}`, {}, 'blob')
+}
 export const reactToPost = (postId, emoji) =>
   call('reaction', { method: 'POST', body: JSON.stringify({ post_id: postId, emoji }) })
 export const deletePost = (postId) =>

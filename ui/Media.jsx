@@ -196,7 +196,7 @@ function ManagedImage({ attachment, storagePath, postId, index, className, alt, 
           return
         }
         try {
-          const full = await getBoardMedia(postId, index)
+          const full = await getBoardMedia(postId, index, { mime: attachment?.mime })
           const fullUrl = URL.createObjectURL(full)
           onOpen(fullUrl, alt, () => URL.revokeObjectURL(fullUrl))
         } catch {
