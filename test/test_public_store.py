@@ -7,6 +7,7 @@ import sqlite3
 import struct
 import tempfile
 import unittest
+import uuid
 import zlib
 from pathlib import Path
 from unittest.mock import call, patch
@@ -14,8 +15,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from common_protocol import validate_attachment
+from common_protocol import MAX_BOARD_ATTACHMENTS, validate_attachment
 from common_public import (
+  BOARD_IMAGE_CACHE,
   BOARD_INDEX_NORMALIZATION_VERSION,
   CommonPublicStore,
   create_public_router,
@@ -593,3 +595,80 @@ class PublicBoardIndexTests(unittest.TestCase):
 
 if __name__ == "__main__":
   unittest.main()
+
+
+class BoardImageLinkTests(unittest.TestCase):
+  """Links ending in the image type let the site's CDN keep board images."""
+
+  def test_typed_links_serve_the_stored_image_and_leave_caches_on_delete(self):
+    with tempfile.TemporaryDirectory() as directory:
+      store = CommonPublicStore(directory)
+      post_id = str(uuid.uuid4())
+      gallery_id = str(uuid.uuid4())
+      output = io.BytesIO()
+      Image.new("RGB", (64, 48), (48, 96, 160)).save(output, format="JPEG")
+      jpeg = output.getvalue()
+      wire = {"mime": "image/jpeg", "w": 64, "h": 48}
+      post = {"host": "author.example", "text": "", "created_at": 1.0, "replies": []}
+      store.store_post({**post, "id": post_id}, (wire, jpeg))
+      store.store_post({**post, "id": gallery_id}, attachments=[(wire, jpeg), (wire, jpeg)])
+      app = FastAPI()
+      router, _ = create_public_router(store, None)
+      app.include_router(router)
+      with TestClient(app) as client:
+        for path, mime in (
+          (f"/board/media/{post_id}.jpg", "image/jpeg"),
+          (f"/board/media/{post_id}", "image/jpeg"),
+          (f"/board/media/{gallery_id}/1.jpg", "image/jpeg"),
+          (f"/board/media/{gallery_id}/1", "image/jpeg"),
+          (f"/board/thumbnail/{post_id}.webp", "image/webp"),
+          (f"/board/thumbnail/{post_id}", "image/webp"),
+          (f"/board/thumbnail/{gallery_id}/1.webp", "image/webp"),
+          (f"/board/thumbnail/{gallery_id}/1", "image/webp"),
+        ):
+          with self.subTest(path=path):
+            response = client.get(path)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers["content-type"], mime)
+            # Browsers keep what they showed for a day; the CDN, which
+            # answers anyone, drops a deleted post's image within an hour.
+            self.assertEqual(response.headers["cache-control"], BOARD_IMAGE_CACHE)
+            self.assertIn("s-maxage=3600", BOARD_IMAGE_CACHE)
+            revalidated = client.get(path, headers={"If-None-Match": response.headers["etag"]})
+            self.assertEqual(revalidated.status_code, 304)
+
+        for path in (
+          f"/board/media/{post_id}.png",
+          f"/board/media/{gallery_id}/1.webp",
+          f"/board/thumbnail/{post_id}.jpg",
+        ):
+          with self.subTest(wrong_type=path):
+            response = client.get(path)
+            self.assertEqual(response.status_code, 404)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+
+        for path in (
+          f"/board/media/{gallery_id}/x.jpg",
+          f"/board/media/{gallery_id}/-1.jpg",
+          f"/board/thumbnail/{gallery_id}/{MAX_BOARD_ATTACHMENTS}.webp",
+          "/board/media/not-an-id.jpg",
+        ):
+          with self.subTest(invalid=path):
+            self.assertEqual(client.get(path).status_code, 400)
+
+        store.delete_post(post_id, "author.example")
+        for path in (f"/board/media/{post_id}.jpg", f"/board/thumbnail/{post_id}.webp"):
+          with self.subTest(deleted=path):
+            response = client.get(path)
+            self.assertEqual(response.status_code, 404)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+
+  def test_a_missing_member_avatar_is_never_cached(self):
+    with tempfile.TemporaryDirectory() as directory:
+      app = FastAPI()
+      router, _ = create_public_router(CommonPublicStore(directory), None)
+      app.include_router(router)
+      with TestClient(app) as client:
+        response = client.get(f"/directory/avatars/{'0' * 64}.webp")
+      self.assertEqual(response.status_code, 404)
+      self.assertEqual(response.headers["cache-control"], "no-store")

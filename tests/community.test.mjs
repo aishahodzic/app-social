@@ -29,6 +29,28 @@ test('public browsing is read-only and names no board host', async () => {
   } finally { globalThis.fetch = previous }
 })
 
+test('opening a board photo names its recorded type; thumbnails never do', async () => {
+  const api = await import('../api.js')
+  const previous = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url) => {
+    calls.push(new URL(url, 'https://local.example'))
+    return { ok: true, blob: async () => new Blob() }
+  }
+  try {
+    await api.getBoardMedia('post-1', 2, { mime: 'image/png' })
+    await api.getBoardMedia('post-1', undefined, { mime: 'image/jpeg' })
+    await api.getBoardMedia('post-1', 0, { thumbnail: true, mime: 'image/png' })
+    await api.getBoardMedia('post-1', 1)
+    assert.deepEqual(calls.map(url => [url.pathname, url.searchParams.get('thumbnail'), url.searchParams.get('mime')]), [
+      ['/api/services/social/board-media/post-1/2', 'false', 'image/png'],
+      ['/api/services/social/board-media/post-1', 'false', 'image/jpeg'],
+      ['/api/services/social/board-media/post-1/0', 'true', null],
+      ['/api/services/social/board-media/post-1/1', 'false', null],
+    ])
+  } finally { globalThis.fetch = previous }
+})
+
 test('board paging forwards an opaque stable cursor unchanged', async () => {
   const api = await import('../api.js')
   const previous = globalThis.fetch
