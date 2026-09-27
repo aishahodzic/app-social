@@ -23,6 +23,12 @@ app.include_router(social_router)
 app.include_router(groups_router)
 app.include_router(objects_router)
 
+# Möbius may run everything above once and fork each request from it, which
+# removes ~0.9 s of imports per request. Module setup therefore reads only
+# per-installation values (APP_ID, APP_SLUG, APP_STORAGE_DIR) and starts no
+# threads; APP_TOKEN and the request are read inside dispatch().
+MOBIUS_PRELOAD = True
+
 
 async def dispatch(request: dict) -> dict:
   migrate_legacy_state()

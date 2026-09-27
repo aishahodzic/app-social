@@ -4,6 +4,7 @@ import { CSS } from './theme.js'
 import * as api from './api.js'
 import Board, { Avatar } from './ui/Board.jsx'
 import { primeAvatar } from './avatarCache.js'
+import { noteBoardAvatarDigests } from './avatarHints.js'
 import Messages from './ui/Messages.jsx'
 import Thread from './ui/Thread.jsx'
 import GroupThread from './ui/GroupThread.jsx'
@@ -149,6 +150,9 @@ export default function App({ appId, token }) {
   const toastTimer = useRef(null)
   const readySignalled = useRef(false)
   const freshFeedLoaded = useRef(false)
+  const meRef = useRef(null)
+  meRef.current = me
+  const handoffPending = useRef(false)
 
   function showToast(text, kind) {
     setToast({ text, kind })
@@ -156,17 +160,28 @@ export default function App({ appId, token }) {
     toastTimer.current = setTimeout(() => setToast(null), 2600)
   }
 
-  async function loadMe({ background = false } = {}) {
+  async function loadMe({ background = false, verified = null } = {}) {
     try {
-      const loaded = await api.getMe({ includeAvatar: !background })
-      const profile = loaded
+      const profile = await api.getMe({ includeAvatar: !background, background })
       // Identity is useful context, not a prerequisite for the public board.
       // Reveal it after the local profile read while directory verification
       // continues in the background.
       if ('avatar' in profile) primeAvatar(profile.host, profile.avatar)
+      if (
+        profile.joined && verified?.registration === 'registered'
+        && verified.host === profile.host
+      ) {
+        // Bootstrap just verified this identity in the directory.
+        const checked = { ...profile, registration: 'registered' }
+        setMe(checked)
+        setMeState('ready')
+        return checked
+      }
       setMe(profile)
       setMeState('ready')
-      const registration = await checkGlobalRegistration(profile, api.searchPeople)
+      const registration = await checkGlobalRegistration(
+        profile, (query) => api.searchPeople(query, undefined, { background }),
+      )
       const checked = { ...profile, registration }
       setMe(checked)
       setMeState('ready')
@@ -218,7 +233,7 @@ export default function App({ appId, token }) {
 
   const loadFeed = useCallback(async (background = false) => {
     try {
-      const result = await api.getFeed()
+      const result = await api.getFeed(null, { background })
       const posts = result.posts || []
       acceptFeed(posts, background, result.capabilities, result.next_cursor)
       return true
@@ -240,7 +255,7 @@ export default function App({ appId, token }) {
       setMeState('ready')
       // Bootstrap paints saved identity immediately; the account owner still
       // reconciles every launch so a connected profile cannot remain stale.
-      loadMe({ background: true })
+      loadMe({ background: true, verified: result.me })
       return true
     } catch {
       // A partially updated installation still gets the established separate
@@ -292,6 +307,7 @@ export default function App({ appId, token }) {
     window.mobius?.storage?.get('cache/board.json')
       .then((cached) => {
         if (freshFeedLoaded.current || !Array.isArray(cached?.posts)) return
+        noteBoardAvatarDigests(cached.posts)
         setFeed(cached.posts)
         const cachedCursor = cached.next_cursor === null || typeof cached.next_cursor === 'string'
           ? cached.next_cursor : undefined
@@ -312,7 +328,7 @@ export default function App({ appId, token }) {
       api.getAppIcon(appId)
         .then((blob) => setAppIconUrl(URL.createObjectURL(blob)))
         .catch(() => {})
-      api.searchPeople('')
+      api.searchPeople('', undefined, { background: true })
         .then((found) => window.mobius?.storage?.set('cache/people.json', {
           users: found.users,
           cached_at: Date.now(),
@@ -331,13 +347,19 @@ export default function App({ appId, token }) {
   // Identity linking happens in Möbius · You. When the owner returns, read the
   // authoritative profile again; never infer success from the app switch and
   // never turn a completed sign-in into an automatic directory join or post.
+  // Only an unfinished account handoff can change on return; a joined owner's
+  // profile reconciles once per launch instead of on every pane focus.
   useEffect(() => {
     let refreshing = false
     const refreshAfterHandoff = async () => {
       if (document.visibilityState === 'hidden' || refreshing) return
+      const joined = meRef.current?.joined && meRef.current?.name
+      if (joined && !handoffPending.current) return
       refreshing = true
       try {
         const profile = await loadMe({ background: true })
+        // Returning before linking finished keeps the handoff pending.
+        if (profile?.connected) handoffPending.current = false
         if (profile) await loadFeed(true)
       } finally {
         refreshing = false
@@ -485,6 +507,7 @@ export default function App({ appId, token }) {
   const [joinError, setJoinError] = useState(null)
 
   function openIdentityApp() {
+    handoffPending.current = true
     accountHandoff(me, (message, target) => window.parent.postMessage(message, target))
   }
 

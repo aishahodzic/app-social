@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { ImageSquare, X } from '@openai/apps-sdk-ui/components/Icon'
 import { getBoardMedia } from '../api.js'
+import { boardThumbnail } from '../boardMediaCache.js'
 
 const MAX_BYTES = 1024 * 1024
 const MAX_SIDE = 1600
@@ -150,7 +151,7 @@ function ManagedImage({ attachment, storagePath, postId, index, className, alt, 
     }
     setUrl(null)
     const load = postId
-      ? getBoardMedia(postId, index, { thumbnail: true })
+      ? boardThumbnail(postId, index)
       : window.mobius?.storage?.getBlob?.(storagePath)
     if (!load?.then) {
       setFailed(true)

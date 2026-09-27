@@ -86,7 +86,7 @@ from common_protocol import (
   validate_text_or_attachment as _validate_text_or_attachment,
 )
 from common_public import (
-  BOARD_REACTION_EMOJIS, CommonPublicStore, image_thumbnail_bytes,
+  AVATAR_DIGEST, BOARD_REACTION_EMOJIS, CommonPublicStore, image_thumbnail_bytes,
 )
 from common_transport import FederationTransportError, federation_request
 from service_io import atomic_write
@@ -118,6 +118,9 @@ PEER_AVATAR_BATCH_TIMEOUT_S = 12
 # malicious raster never reaches the browser and cached blobs stay tiny.
 AVATAR_MAX_SIDE = 128
 AVATAR_MAX_PIXELS = 8_000_000
+# Owner-facing board images: one post image per URL, dropped after a day in
+# case the post is deleted.
+OWNER_BOARD_IMAGE_CACHE = "private, max-age=86400"
 BOARD_MEDIA_CACHE_TTL_S = 24 * 3600
 REQUEST_STATES = {"pending", "accepted", "declined", "blocked"}
 
@@ -136,9 +139,14 @@ def _common_dir() -> Path:
 
 _actor_verifier = ActorVerifier(_data_dir)
 _find_image = CommonPublicStore.find_image
-_serve_image = CommonPublicStore.serve_image
 _fetch_actor = _actor_verifier.fetch_actor
 _verify_peer_envelope = _actor_verifier.verify_envelope
+
+
+def _serve_image(found):
+  # Social's own sandboxed frame gets a fresh browser cache per launch, so it
+  # also keeps thumbnails in app storage (boardMediaCache.js).
+  return CommonPublicStore.serve_image(found, cache_control=OWNER_BOARD_IMAGE_CACHE)
 
 
 def _identity_path() -> Path:
@@ -161,6 +169,12 @@ def _peer_avatar_path(host: str) -> Path:
   path.mkdir(parents=True, exist_ok=True)
   # Re-encoded WebP; a legacy `.png` cache is simply re-fetched once.
   return path / f"{safe}.webp"
+
+
+def _peer_avatar_digest_path(host: str) -> Path:
+  """Content hash of a cached avatar copied from the community directory."""
+  safe = re.sub(r"[^a-z0-9.-]", "_", host)
+  return _peers_dir() / "avatars" / f"{safe}.digest"
 
 
 def _peer_avatar_miss_path(host: str) -> Path:
@@ -1133,6 +1147,9 @@ class PublishPost(BaseModel):
 
 class AvatarBatch(BaseModel):
   hosts: list[str]
+  # Directory members' avatar content hashes, as board and directory rows
+  # report them; a matching cached copy never needs another fetch.
+  avatars: dict[str, str] = {}
 
 
 async def _refresh_profile_cache(db, principal: Principal) -> dict:
@@ -1180,6 +1197,10 @@ async def _refresh_profile_cache(db, principal: Principal) -> dict:
         identity.pop("avatar_source_url", None)
         _save_identity(identity)
         avatar_updated = True
+  if identity.get("joined_at") and identity.get("directory_synced") != _directory_listing(identity):
+    # The directory lists this handle and copies this avatar; re-registering
+    # tells the community host to refresh both, and repeats until it succeeds.
+    await _register_with_community_host(identity)
   return {
     "identity": identity,
     "profile": profile,
@@ -1274,6 +1295,14 @@ async def join_community(
   }
 
 
+def _directory_listing(identity: dict) -> dict:
+  """What the community directory shows for this instance."""
+  return {
+    "handle": identity.get("handle") or "",
+    "avatar": identity.get("avatar_source_url") or "",
+  }
+
+
 async def _register_with_community_host(identity: dict) -> str:
   """Announce this instance to its community host. Returns a status string."""
   host = COMMUNITY_HOST
@@ -1292,11 +1321,13 @@ async def _register_with_community_host(identity: dict) -> str:
       max_response_bytes=MAX_ENVELOPE_BYTES,
     )
     response.raise_for_status()
-    return "registered"
   except httpx.HTTPStatusError as exc:
     return "verification_failed" if exc.response.status_code == 403 else "rejected"
   except Exception:
     return "unreachable"
+  identity["directory_synced"] = _directory_listing(identity)
+  _save_identity(identity)
+  return "registered"
 
 
 def _community_write_error(exc: Exception, action: str) -> str:
@@ -1921,7 +1952,39 @@ async def get_peer(
   return actor
 
 
-async def _resolve_peer_avatar(host: str) -> tuple[Path, str]:
+async def _member_avatar_from_directory(host: str, digest: str) -> tuple[Path, str] | None:
+  """Serve a directory member's avatar by content hash, via the community host.
+
+  The hash names one exact image, so a matching cached copy is current without
+  asking anyone, and a new one comes from the community host's shared copy
+  rather than from the member's own server. Bytes are verified against the hash
+  and still re-encoded like any peer image. None falls back to the peer path.
+  """
+  cache = _peer_avatar_path(host)
+  marker = _peer_avatar_digest_path(host)
+  try:
+    if cache.is_file() and marker.read_text().strip() == digest:
+      return cache, "image/webp"
+  except OSError:
+    pass
+  try:
+    raw = await _download_avatar(
+      _peer_service_url(COMMUNITY_HOST, f"directory/avatars/{digest}.webp"),
+    )
+    if hashlib.sha256(raw).hexdigest() != digest:
+      raise ValueError("Directory avatar does not match its content hash.")
+    _mime, encoded = await _decode_avatar(raw)
+    atomic_write(cache, encoded)
+    atomic_write(marker, digest.encode())
+    _clear_avatar_markers(host)
+  except Exception:
+    return None
+  return cache, "image/webp"
+
+
+async def _resolve_peer_avatar(
+  host: str, directory_digest: str | None = None,
+) -> tuple[Path, str]:
   host = host.strip().lower()
   if not _valid_host(host):
     raise HTTPException(status_code=400, detail="Invalid peer host.")
@@ -1929,6 +1992,10 @@ async def _resolve_peer_avatar(host: str) -> tuple[Path, str]:
     if not _avatar_path().is_file():
       raise HTTPException(status_code=404, detail="Avatar not found.")
     return _avatar_path(), "image/png"
+  if directory_digest is not None:
+    found = await _member_avatar_from_directory(host, directory_digest)
+    if found is not None:
+      return found
   cache = _peer_avatar_path(host)
   now = time.time()
   # Serve a fresh cached avatar without any federation hop (the common path).
@@ -1963,6 +2030,7 @@ async def _resolve_peer_avatar(host: str) -> tuple[Path, str]:
     # contract without expanding multiple untrusted rasters at once.
     _mime, encoded = await _decode_avatar(raw)
     atomic_write(cache, encoded)
+    _peer_avatar_digest_path(host).unlink(missing_ok=True)
     _clear_avatar_markers(host)
   except httpx.HTTPStatusError as exc:
     if exc.response.status_code == 404:
@@ -1990,11 +2058,16 @@ async def get_peer_avatars(
   hosts = list(dict.fromkeys(host.strip().lower() for host in batch.hosts))
   if any(not _valid_host(host) for host in hosts):
     raise HTTPException(status_code=400, detail="Invalid peer host.")
+  digests = {
+    host.strip().lower(): digest for host, digest in batch.avatars.items()
+    if isinstance(digest, str) and AVATAR_DIGEST.fullmatch(digest)
+  }
 
   async def resolve(host: str):
     try:
       path, media_type = await asyncio.wait_for(
-        _resolve_peer_avatar(host), timeout=PEER_AVATAR_BATCH_TIMEOUT_S,
+        _resolve_peer_avatar(host, digests.get(host)),
+        timeout=PEER_AVATAR_BATCH_TIMEOUT_S,
       )
       return host, _avatar_wire(path, media_type), None
     except HTTPException as exc:
@@ -2014,11 +2087,21 @@ async def get_peer_avatars(
   avatars = {}
   missing = []
   unavailable = []
+  served_digests = {}
   for host, avatar, status in await asyncio.gather(*(resolve(host) for host in hosts)):
     if avatar is not None:
       avatars[host] = avatar
+      try:
+        served = _peer_avatar_digest_path(host).read_text().strip()
+      except OSError:
+        served = ""
+      if served and served == digests.get(host):
+        served_digests[host] = served
     elif status == "missing":
       missing.append(host)
     else:
       unavailable.append(host)
-  return {"avatars": avatars, "missing": missing, "unavailable": unavailable}
+  return {
+    "avatars": avatars, "missing": missing, "unavailable": unavailable,
+    "digests": served_digests,
+  }

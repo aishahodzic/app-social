@@ -4,15 +4,16 @@ import {
 } from '@openai/apps-sdk-ui/components/Icon'
 import {
   acceptMessageRequest, blockMessageRequest, clearUnread, clockTime,
-  declineMessageRequest, getCachedMessages, getPeer, listMessages, retryMessage, sendMessage,
+  declineMessageRequest, getPeer, listMessages, retryMessage, sendMessage,
+  watchLatestMessages,
 } from '../api.js'
 import { Avatar } from './Board.jsx'
 import MessageBubble, { ReplyTarget, replyTargetFor } from './MessageBubble.jsx'
 import MessageInput from './MessageInput.jsx'
 import { prepareImage, SelectedImageStrip } from './Media.jsx'
 import {
-  isDefinitePrecommitRejection, reconcileLatestPage, reconcileOlderPage,
-  settleMessage,
+  addUnseenMessages, isDefinitePrecommitRejection, reconcileLatestPage,
+  reconcileOlderPage, settleMessage,
 } from '../message_ui_state.js'
 
 export default function Thread({
@@ -35,6 +36,7 @@ export default function Thread({
   const scrollRef = useRef(null)
   const messagesRef = useRef(null)
   const refreshRequest = useRef(0)
+  const latestPage = useRef(null)
   const paginationGeneration = useRef(0)
   const seenVersion = useRef(version)
   const stickToBottom = useRef(true)
@@ -47,10 +49,10 @@ export default function Thread({
     setMessages(value)
   }
 
-  async function refresh({ replace = false } = {}) {
+  async function refresh({ replace = false, background = false } = {}) {
     const request = ++refreshRequest.current
     try {
-      const page = await listMessages(peer)
+      const page = await listMessages(peer, null, { background })
       if (request !== refreshRequest.current) return false
       const reconciled = reconcileLatestPage(messagesRef.current, page, { replace })
       updateMessages(reconciled.messages)
@@ -69,19 +71,27 @@ export default function Thread({
   }
 
   useEffect(() => {
-    let active = true
     seenVersion.current = version
     paginationGeneration.current += 1
     updateMessages(null)
     setNextCursor(null)
-    getCachedMessages(peer).then((page) => {
-      if (!active || messagesRef.current !== null || !page?.messages.length) return
-      const reconciled = reconcileLatestPage(null, page, { replace: true })
-      updateMessages(reconciled.messages)
-      setNextCursor(reconciled.nextCursor)
-    }).catch(() => {})
+    const watch = watchLatestMessages(peer, (page) => {
+      if (messagesRef.current === null) {
+        if (!page.messages.length) return
+        const reconciled = reconcileLatestPage(null, page, { replace: true })
+        updateMessages(reconciled.messages)
+        setNextCursor(reconciled.nextCursor)
+        return
+      }
+      updateMessages((prior) => addUnseenMessages(prior, page))
+    })
+    latestPage.current = watch
     refresh({ replace: true })
-    return () => { active = false; refreshRequest.current += 1 }
+    return () => {
+      watch.stop()
+      latestPage.current = null
+      refreshRequest.current += 1
+    }
   }, [peer])
 
   // Messages are read only while this pane is actually visible to the owner.
@@ -93,7 +103,7 @@ export default function Thread({
     let active = true
     setPeerActor(null)
     if (requestPending) return () => { active = false }
-    getPeer(peer)
+    getPeer(peer, undefined, { background: true })
       .then((actor) => { if (active) setPeerActor(actor) })
       .catch(() => {})
     return () => { active = false }
@@ -102,7 +112,10 @@ export default function Thread({
   useEffect(() => {
     if (version > 0 && version !== seenVersion.current) {
       seenVersion.current = version
-      refresh()
+      // The published page shows a new message within one storage read; the
+      // authoritative history then settles statuses without jumping the queue.
+      latestPage.current?.recheck()
+      refresh({ background: true })
     }
   }, [version])
 

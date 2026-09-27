@@ -2,33 +2,108 @@
 // Social owns signing, delivery, persistence, and peer verification behind
 // the platform's reviewed app-service boundary.
 
+import { noteAvatarDigests, noteBoardAvatarDigests } from './avatarHints.js'
+
 let bearer = null
 export function setToken(token) { bearer = token }
 
-async function call(path, options = {}, responseType = 'json') {
-  const response = await fetch(`/api/services/social/${path}`, {
-    ...options,
-    headers: {
-      Authorization: `Bearer ${bearer}`,
-      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(options.headers || {}),
-    },
-  })
-  if (!response.ok) {
-    let detail = ''
-    try { detail = (await response.json()).detail || '' } catch { /* opaque */ }
-    const error = new Error(detail || `Request failed (${response.status}).`)
-    error.status = response.status
-    throw error
+async function request(path, options, responseType) {
+  const { timeoutMs, ...init } = options
+  // The deadline covers the service's work, not time spent waiting its turn.
+  const deadline = timeoutMs ? new AbortController() : null
+  const timer = deadline ? setTimeout(() => deadline.abort(), timeoutMs) : null
+  const signal = deadline && init.signal
+    ? AbortSignal.any([init.signal, deadline.signal])
+    : deadline?.signal || init.signal
+  try {
+    const response = await fetch(`/api/services/social/${path}`, {
+      ...init,
+      ...(signal ? { signal } : {}),
+      headers: {
+        Authorization: `Bearer ${bearer}`,
+        ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(init.headers || {}),
+      },
+    })
+    if (!response.ok) {
+      let detail = ''
+      try { detail = (await response.json()).detail || '' } catch { /* opaque */ }
+      const error = new Error(detail || `Request failed (${response.status}).`)
+      error.status = response.status
+      throw error
+    }
+    if (responseType === 'blob') return await response.blob()
+    if (responseType === 'none') return null
+    return await response.json()
+  } finally {
+    if (timer) clearTimeout(timer)
   }
-  if (responseType === 'blob') return response.blob()
-  if (responseType === 'none') return null
-  return response.json()
 }
 
-export const getMe = ({ includeAvatar = true } = {}) =>
-  call(`me?include_avatar=${includeAvatar ? 'true' : 'false'}`)
-export const getBootstrap = () => call('bootstrap')
+// Möbius runs one private Social request at a time, and on hosts that cannot
+// preload the service each one starts a fresh process (about a second), so
+// anything queued ahead of a request the owner is waiting on delays it.
+// Owner-visible requests go straight out; upkeep (polls, prefetches, read
+// receipts, identity reconciliation) waits until no owner-visible request is
+// outstanding and then runs one at a time, so at most one upkeep request can
+// ever sit ahead of one the owner asked for.
+let foregroundInFlight = 0
+let backgroundActive = false
+const backgroundQueue = []
+
+function abortError() {
+  return new DOMException('The request was aborted.', 'AbortError')
+}
+
+function pumpBackground() {
+  while (!backgroundActive && foregroundInFlight === 0 && backgroundQueue.length) {
+    const job = backgroundQueue.shift()
+    if (job.signal?.aborted) {
+      job.reject(abortError())
+      continue
+    }
+    backgroundActive = true
+    job.run().finally(() => {
+      backgroundActive = false
+      pumpBackground()
+    })
+  }
+}
+
+async function call(path, options = {}, responseType = 'json') {
+  const { background = false, ...init } = options
+  if (background) {
+    return new Promise((resolve, reject) => {
+      const job = {
+        signal: init.signal,
+        reject,
+        run: () => request(path, init, responseType).then(resolve, reject),
+      }
+      init.signal?.addEventListener('abort', () => {
+        const index = backgroundQueue.indexOf(job)
+        if (index === -1) return
+        backgroundQueue.splice(index, 1)
+        reject(abortError())
+      }, { once: true })
+      backgroundQueue.push(job)
+      pumpBackground()
+    })
+  }
+  foregroundInFlight += 1
+  try {
+    return await request(path, init, responseType)
+  } finally {
+    foregroundInFlight -= 1
+    pumpBackground()
+  }
+}
+
+export const getMe = ({ includeAvatar = true, background = false } = {}) =>
+  call(`me?include_avatar=${includeAvatar ? 'true' : 'false'}`, { background })
+export const getBootstrap = () => call('bootstrap').then((result) => {
+  noteBoardAvatarDigests(result?.feed?.posts)
+  return result
+})
 export const join = () => call('join', { method: 'POST', body: JSON.stringify({}) })
 export const saveMe = (settings) =>
   call('me', { method: 'PUT', body: JSON.stringify(settings) })
@@ -59,10 +134,13 @@ export const publishPost = (text, attachment, attachments, thumbnails) =>
     }),
   })
 export const BOARD_PAGE_SIZE = 30
-export const getFeed = (before = null) => {
+export const getFeed = (before = null, { background = false } = {}) => {
   const query = new URLSearchParams({ limit: String(BOARD_PAGE_SIZE) })
   if (before !== null && before !== undefined) query.set('before', String(before))
-  return call(`feed?${query}`)
+  return call(`feed?${query}`, { background }).then((result) => {
+    noteBoardAvatarDigests(result?.posts)
+    return result
+  })
 }
 export const getBoardMedia = (postId, index, { thumbnail = false } = {}) =>
   call(
@@ -75,12 +153,21 @@ export const reactToPost = (postId, emoji) =>
   call('reaction', { method: 'POST', body: JSON.stringify({ post_id: postId, emoji }) })
 export const deletePost = (postId) =>
   call('delete', { method: 'POST', body: JSON.stringify({ post_id: postId }) })
-export const getReplies = (postId) =>
-  call(`replies/${encodeURIComponent(postId)}`)
+export const getReplies = (postId, { background = false } = {}) =>
+  call(`replies/${encodeURIComponent(postId)}`, { background }).then((result) => {
+    noteAvatarDigests(result?.replies)
+    return result
+  })
 export const postReply = (postId, text) =>
   call('reply', { method: 'POST', body: JSON.stringify({ post_id: postId, text }) })
-export const searchPeople = (q, signal) => call(`people?q=${encodeURIComponent(q.trim().replace(/^@/, ''))}`, { signal })
-export const getPeer = (host, signal) => call(`peer/${encodeURIComponent(host)}`, { signal })
+export const searchPeople = (q, signal, { background = false } = {}) =>
+  call(`people?q=${encodeURIComponent(q.trim().replace(/^@/, ''))}`, { signal, background })
+    .then((result) => {
+      noteAvatarDigests(result?.users)
+      return result
+    })
+export const getPeer = (host, signal, { background = false } = {}) =>
+  call(`peer/${encodeURIComponent(host)}`, { signal, background })
 export async function getAppIcon(appId) {
   const response = await fetch(`/api/apps/${appId}/icon`, {
     headers: { Authorization: `Bearer ${bearer}` },
@@ -88,9 +175,9 @@ export async function getAppIcon(appId) {
   if (!response.ok) throw new Error('icon unavailable')
   return response.blob()
 }
-export const getPeerAvatars = (hosts) =>
+export const getPeerAvatars = (hosts, { background = false, digests = {} } = {}) =>
   call('peer-avatars', {
-    method: 'POST', body: JSON.stringify({ hosts }),
+    method: 'POST', body: JSON.stringify({ hosts, avatars: digests }), background,
   })
 
 // ── conversation storage (each side keeps only its own copy) ────────────────
@@ -125,82 +212,70 @@ function validHistoryPage(value) {
     && (value.next_cursor === null || typeof value.next_cursor === 'string')
 }
 
-async function readCachedHistory(path) {
-  const store = window.mobius?.storage
-  if (!store) return null
-  try {
-    const value = await store.get(path)
-    return validHistoryPage(value) ? value : null
-  } catch {
-    return null
-  }
-}
-
-async function writeCachedHistory(path, page) {
-  const store = window.mobius?.storage
-  if (!store || typeof store.set !== 'function') return
-  try { await store.set(path, page) } catch { /* history remains canonical */ }
-}
-
-// Serialize advisory writes per conversation so a late response cannot replace
-// the newest page that the current view accepted.
-const historyCacheState = new Map()
-
-function beginHistoryRefresh(path) {
-  const state = historyCacheState.get(path) || {
-    generation: 0,
-    write: Promise.resolve(),
-  }
-  state.generation += 1
-  historyCacheState.set(path, state)
-  return { state, generation: state.generation }
-}
-
-function persistLatestHistory(path, page, refresh) {
-  refresh.state.write = refresh.state.write.then(async () => {
-    if (refresh.state.generation !== refresh.generation) return
-    await writeCachedHistory(path, page)
-  })
-}
-
-async function listHistory(path, fallbackPrefix, cachePath, before) {
+async function listHistory(path, fallbackPrefix, before, { background = false } = {}) {
   const query = new URLSearchParams({ limit: '50' })
   if (before) query.set('before', before)
-  const refresh = before ? null : beginHistoryRefresh(cachePath)
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), HISTORY_TIMEOUT_MS)
   try {
-    const page = await call(`${path}?${query}`, { signal: controller.signal })
-    if (!before) persistLatestHistory(cachePath, page, refresh)
-    return page
+    return await call(`${path}?${query}`, { timeoutMs: HISTORY_TIMEOUT_MS, background })
   } catch (error) {
-    // A snapshot only speeds first paint. Canonical per-message records own
-    // offline recovery, so an older snapshot cannot hide a newer saved message.
+    // Canonical per-message records own offline recovery, so an older
+    // first-paint page can never hide a newer saved message.
     if (before || error.status) throw error
     const messages = (await listStoredMessages(fallbackPrefix)).slice(-50)
     if (messages.length) return { messages, next_cursor: null }
     throw error
-  } finally {
-    clearTimeout(timer)
   }
 }
 
+// Social's service rewrites each conversation's newest page at these paths
+// whenever one of its messages changes (message_history._publish_latest_page),
+// so the page is as current as the saved messages themselves. Möbius storage
+// answers from the device copy first and then delivers the server's copy when
+// it differs: a watcher paints at once and still receives a message that
+// arrived while the app was closed, without waiting for the service.
 const directHistoryCachePath = peer => `cache/message-history/dm/${encodeURIComponent(peer)}.json`
 const groupHistoryCachePath = gid => `cache/message-history/group/${encodeURIComponent(gid)}.json`
 
-export const getCachedMessages = peer => readCachedHistory(directHistoryCachePath(peer))
-export const getCachedGroupMessages = gid => readCachedHistory(groupHistoryCachePath(gid))
+function watchLatestPage(path, onPage) {
+  const store = window.mobius?.storage
+  if (typeof store?.subscribe !== 'function') return { stop() {}, recheck() {} }
+  let active = true
+  let subscription = null
+  try {
+    subscription = store.subscribe(path, (value) => {
+      if (active && validHistoryPage(value)) onPage(value)
+    })
+  } catch {
+    return { stop() {}, recheck() {} }
+  }
+  return {
+    stop() {
+      active = false
+      if (typeof subscription === 'function') subscription()
+    },
+    // A read revalidates the device copy and notifies the watcher on change.
+    recheck() {
+      if (active) Promise.resolve(store.get(path)).catch(() => null)
+    },
+  }
+}
 
-export const listMessages = (peer, before = null) => listHistory(
+export const watchLatestMessages = (peer, onPage) =>
+  watchLatestPage(directHistoryCachePath(peer), onPage)
+export const watchLatestGroupMessages = (gid, onPage) =>
+  watchLatestPage(groupHistoryCachePath(gid), onPage)
+
+export const listMessages = (peer, before = null, options = {}) => listHistory(
   `conversations/${encodeURIComponent(peer)}/messages`,
   `conversations/${peer}/msgs/`,
-  directHistoryCachePath(peer),
   before,
+  options,
 )
 
+// Read receipts are upkeep: nothing on screen waits for them.
 export const clearUnread = peer =>
   call(`conversations/${encodeURIComponent(peer)}/read`, {
-    method: 'POST', body: JSON.stringify({}),
+    method: 'POST', body: JSON.stringify({}), background: true,
   })
 export const acceptMessageRequest = peer =>
   call(`requests/dm/${encodeURIComponent(peer)}/accept`, { method: 'POST', body: JSON.stringify({}) })
@@ -243,16 +318,16 @@ export async function getGroup(gid) {
   return value
 }
 
-export const listGroupMessages = (gid, before = null) => listHistory(
+export const listGroupMessages = (gid, before = null, options = {}) => listHistory(
   `groups/${encodeURIComponent(gid)}/messages`,
   `groups/${gid}/msgs/`,
-  groupHistoryCachePath(gid),
   before,
+  options,
 )
 
 export const clearGroupUnread = gid =>
   call(`groups/${encodeURIComponent(gid)}/read`, {
-    method: 'POST', body: JSON.stringify({}),
+    method: 'POST', body: JSON.stringify({}), background: true,
   })
 
 // The creator removes a deleted group from Messages; other members retain history.

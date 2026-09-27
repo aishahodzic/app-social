@@ -39,33 +39,48 @@ const hostKey = (h) => String(h || '').trim().toLowerCase()
 
 function rememberReplies(key, result) {
   replyCache.delete(key)
-  replyCache.set(key, { result, updatedAt: Date.now(), promise: null })
+  replyCache.set(key, { result, updatedAt: Date.now(), promise: null, background: false })
   while (replyCache.size > REPLY_CACHE_LIMIT) {
     replyCache.delete(replyCache.keys().next().value)
   }
 }
 
-function cachedReplies(postId, { force = false } = {}) {
+function cachedReplies(postId, { force = false, background = false } = {}) {
   const key = String(postId)
   const existing = replyCache.get(key)
   const fresh = existing?.result && Date.now() - existing.updatedAt < REPLY_CACHE_TTL_MS
   if (!force && fresh) return Promise.resolve(existing.result)
-  if (existing?.promise) return existing.promise
+  // A tap must not wait behind queued prefetches: only share an in-flight
+  // request that is at least as urgent as this one.
+  if (existing?.promise && (background || !existing.background)) return existing.promise
 
-  const promise = getReplies(key).then((result) => {
-    rememberReplies(key, result)
+  // A superseded request (a prefetch overtaken by a tap) must not overwrite
+  // the entry its successor now owns.
+  const owns = () => replyCache.get(key)?.promise === promise
+  const promise = getReplies(key, { background }).then((result) => {
+    if (owns()) rememberReplies(key, result)
     return result
   }).catch((error) => {
-    if (existing?.result) replyCache.set(key, { ...existing, promise: null })
-    else replyCache.delete(key)
+    if (owns()) {
+      if (existing?.result) replyCache.set(key, { ...existing, promise: null })
+      else replyCache.delete(key)
+    }
     throw error
   })
   replyCache.set(key, {
     result: existing?.result || null,
     updatedAt: existing?.updatedAt || 0,
     promise,
+    background,
   })
   return promise
+}
+
+// The feed already reports each post's reply count; cached replies that match
+// it need no prefetch.
+function repliesMatchCount(post) {
+  const replies = replyCache.get(String(post.id))?.result?.replies
+  return Array.isArray(replies) && replies.length === Number(post.reply_count || 0)
 }
 
 function FlatEmoji({ emoji }) {
@@ -260,7 +275,9 @@ export default function Board({
   const replyRequest = useRef(0)
   const replySendingRef = useRef(false)
   const reactionPickerRef = useRef(null)
-  const lastActivityAt = useRef(Date.now())
+  // Start relaxed: the launch just delivered the feed, and every early poll
+  // would queue ahead of avatars and history on the single service lane.
+  const lastActivityAt = useRef(0)
   const restoreDeleteFocus = useRef(true)
   const fileRef = useRef(null)
   const composeRef = useModalFocus(composing, () => {
@@ -332,7 +349,7 @@ export default function Board({
       setReplyError('')
     }
     try {
-      const result = await cachedReplies(post.id, { force })
+      const result = await cachedReplies(post.id, { force, background })
       if (request !== replyRequest.current) return
       const loaded = result.replies || []
       setReplies(prior => reconcileReplies(loaded, prior))
@@ -451,12 +468,14 @@ export default function Board({
   useEffect(() => {
     let cancelled = false
     const posts = feed
-      .filter((post) => Number(post.reply_count || 0) > 0)
+      .filter((post) => Number(post.reply_count || 0) > 0 && !repliesMatchCount(post))
       .slice(0, REPLY_PREFETCH_LIMIT)
     const warm = async () => {
       for (const post of posts) {
         if (cancelled) return
-        try { await cachedReplies(post.id) } catch { /* normal open path shows recovery */ }
+        try {
+          await cachedReplies(post.id, { background: true })
+        } catch { /* normal open path shows recovery */ }
       }
     }
     const idleId = window.requestIdleCallback

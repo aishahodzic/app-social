@@ -16,14 +16,17 @@ cross-process file locks, and every installed file is written atomically.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
+import email.utils
 import hashlib
 import io
 import json
 import fcntl
 import logging
 import math
+import re
 import sqlite3
 import threading
 import time
@@ -32,12 +35,13 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from PIL import Image, ImageOps
 
 from common_protocol import (
   ATTACHMENT_MIME_EXT,
   CLOCK_SKEW_S,
+  MAX_AVATAR_BYTES,
   MAX_BOARD_ATTACHMENTS,
   MAX_BIO_CHARS,
   MAX_ENVELOPE_BYTES,
@@ -63,6 +67,17 @@ BOARD_PAGE_LIMIT = 50
 BOARD_REPLY_LIMIT = 200
 BOARD_LIKE_LIMIT = 2000
 DIRECTORY_LIMIT = 2000
+# A member avatar URL is its content hash, so it never changes. A board image
+# never changes either, but its post can be deleted or moderated, so shared
+# caches keep it for at most a day.
+IMMUTABLE_PUBLIC = "public, max-age=31536000, immutable"
+BOARD_IMAGE_CACHE = "public, max-age=86400"
+MEMBER_AVATAR_MAX_SIDE = 128
+MEMBER_AVATAR_MAX_PIXELS = 8_000_000
+# The host re-copies each member's avatar at least this often, so a member
+# whose instance never re-registers still shows a current picture.
+MEMBER_AVATAR_MAX_AGE_S = 24 * 3600
+AVATAR_DIGEST = re.compile(r"[0-9a-f]{64}")
 # A host never silently deletes public/user data.  These admission ceilings
 # bound durable abuse instead: an operator can raise them after provisioning
 # more storage, while existing imported records remain readable at any size.
@@ -176,6 +191,7 @@ class CommonPublicStore:
     self._board_lock = threading.Lock()
     self._board_index_lock = threading.Lock()
     self._board_index_ready = False
+    self._member_avatar_cache: tuple[tuple[int, int], dict[str, str]] | None = None
 
   def data_dir(self) -> Path:
     value = self._data_dir() if callable(self._data_dir) else self._data_dir
@@ -501,14 +517,14 @@ class CommonPublicStore:
     return None
 
   @staticmethod
-  def serve_image(found: tuple[Path, str] | None) -> FileResponse:
+  def serve_image(
+    found: tuple[Path, str] | None, request: Request | None = None, *,
+    cache_control: str = BOARD_IMAGE_CACHE,
+  ) -> Response:
     if found is None:
       raise HTTPException(status_code=404, detail="Board image not found.")
     path, mime = found
-    return FileResponse(
-      str(path), media_type=mime,
-      headers={"X-Content-Type-Options": "nosniff"},
-    )
+    return immutable_file_response(path, mime, request, cache_control=cache_control)
 
   @staticmethod
   def _load_object(path: Path) -> dict:
@@ -521,6 +537,112 @@ class CommonPublicStore:
     if not isinstance(value, dict):
       raise HTTPException(status_code=500, detail="Public data record is invalid.")
     return value
+
+  def member_avatar_dir(self) -> Path:
+    path = self.common_dir() / "member-avatars"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+  def member_avatar_file(self, name: str) -> Path | None:
+    digest, _dot, extension = name.partition(".")
+    if extension != "webp" or not AVATAR_DIGEST.fullmatch(digest):
+      return None
+    path = self.member_avatar_dir() / f"{digest}.webp"
+    return path if path.is_file() else None
+
+  def member_avatars(self) -> dict[str, str]:
+    """Map each directory member's host to its avatar content hash."""
+    path = self.directory_path()
+    try:
+      stat = path.stat()
+    except FileNotFoundError:
+      return {}
+    version = (stat.st_mtime_ns, stat.st_size)
+    cached = self._member_avatar_cache
+    if cached is not None and cached[0] == version:
+      return cached[1]
+    try:
+      entries = self._load_object(path)
+    except HTTPException:
+      # Avatar hashes are an optimization; a damaged directory must not
+      # take board reads down with it.
+      return {}
+    avatars = {
+      host: entry["avatar"]
+      for host, entry in entries.items()
+      if isinstance(host, str) and isinstance(entry, dict)
+      and isinstance(entry.get("avatar"), str)
+      and AVATAR_DIGEST.fullmatch(entry["avatar"])
+    }
+    self._member_avatar_cache = (version, avatars)
+    return avatars
+
+  def set_member_avatar(self, host: str, rendition: bytes | None) -> str | None:
+    """Record a registered member's avatar copy (None: they have none).
+
+    A copy is stored under its content hash, so its URL can be cached forever;
+    a changed avatar gets a new URL and a file no member uses any more is
+    removed. Files change under the directory lock, so two members sharing one
+    image never race.
+    """
+    return self._record_member_avatar_check(host, rendition, replace=True)
+
+  def keep_member_avatar(self, host: str) -> None:
+    """Record a failed check: keep the current copy and retry in a day."""
+    self._record_member_avatar_check(host, None, replace=False)
+
+  def _record_member_avatar_check(
+    self, host: str, rendition: bytes | None, *, replace: bool,
+  ) -> str | None:
+    digest = hashlib.sha256(rendition).hexdigest() if rendition else None
+    with self._mutation_lock(self._directory_lock, "directory"):
+      path = self.directory_path()
+      entries = self._load_object(path)
+      entry = entries.get(host)
+      if not isinstance(entry, dict):
+        return None
+      entry["avatar_checked_at"] = time.time()
+      previous = entry.get("avatar")
+      if not replace:
+        digest = previous if isinstance(previous, str) else None
+      elif digest is None:
+        entry.pop("avatar", None)
+      else:
+        target = self.member_avatar_dir() / f"{digest}.webp"
+        if not target.is_file():
+          atomic_write(target, rendition)
+        entry["avatar"] = digest
+      atomic_write(path, json.dumps(entries, indent=2))
+      in_use = {
+        value.get("avatar") for value in entries.values() if isinstance(value, dict)
+      }
+      if isinstance(previous, str) and AVATAR_DIGEST.fullmatch(previous) and previous not in in_use:
+        (self.member_avatar_dir() / f"{previous}.webp").unlink(missing_ok=True)
+    return digest
+
+  def members_due_for_avatar_check(self, limit: int, now: float | None = None) -> list[str]:
+    """Members whose avatar copy is older than a day (or was never made)."""
+    now = time.time() if now is None else now
+    try:
+      entries = self._load_object(self.directory_path())
+    except HTTPException:
+      return []
+    due = sorted(
+      (float(entry.get("avatar_checked_at") or 0), host)
+      for host, entry in entries.items()
+      if isinstance(host, str) and isinstance(entry, dict)
+      and now - float(entry.get("avatar_checked_at") or 0) >= MEMBER_AVATAR_MAX_AGE_S
+    )
+    return [host for _checked, host in due[:limit]]
+
+  def with_member_avatars(self, people: list) -> list:
+    """Add each listed person's avatar hash so viewers can reuse one image."""
+    avatars = self.member_avatars()
+    if avatars:
+      for person in people:
+        if isinstance(person, dict) and avatars.get(person.get("host")):
+          person["avatar"] = avatars[person["host"]]
+    return people
 
   def search_directory(self, query: str = "") -> dict:
     entries = self._load_object(self.directory_path())
@@ -540,7 +662,7 @@ class CommonPublicStore:
         result["bio"] = bio
       results.append(result)
     results.sort(key=lambda entry: (entry.get("handle") or entry["host"]).lower())
-    return {"users": results[:200]}
+    return {"users": self.with_member_avatars(results[:200])}
 
   def register(self, host: str, handle: str, bio: str) -> dict:
     with self._mutation_lock(self._directory_lock, "directory"):
@@ -548,10 +670,13 @@ class CommonPublicStore:
       entries = self._load_object(path)
       if host not in entries and len(entries) >= DIRECTORY_LIMIT:
         raise HTTPException(status_code=507, detail="Directory is full.")
+      previous = entries.get(host) if isinstance(entries.get(host), dict) else {}
       entries[host] = {
         "handle": handle,
         "bio": bio,
         "registered_at": time.time(),
+        # The avatar copy is refreshed after registration, not reset by it.
+        **{key: previous[key] for key in ("avatar", "avatar_checked_at") if key in previous},
       }
       atomic_write(path, json.dumps(entries, indent=2))
     return {"status": "registered"}
@@ -842,10 +967,10 @@ class CommonPublicStore:
     if not isinstance(replies, list):
       replies = []
     return {
-      "replies": sorted(
+      "replies": self.with_member_avatars(sorted(
         replies,
         key=lambda reply: reply.get("created_at", 0) if isinstance(reply, dict) else 0,
-      )
+      ))
     }
 
   def delete_post(self, post_id: str, host: str) -> dict:
@@ -932,6 +1057,73 @@ def _encode_board_cursor(created_at: float, post_id: str) -> str:
   return base64.urlsafe_b64encode(payload).decode().rstrip("=")
 
 
+def _not_modified(request: Request, etag: str, modified: float) -> bool:
+  candidates = request.headers.get("if-none-match")
+  if candidates is not None:
+    tags = {tag.strip().removeprefix("W/") for tag in candidates.split(",")}
+    return "*" in tags or etag in tags
+  since = request.headers.get("if-modified-since")
+  if since:
+    try:
+      return int(modified) <= email.utils.parsedate_to_datetime(since).timestamp()
+    except (TypeError, ValueError, IndexError, OverflowError):
+      return False
+  return False
+
+
+def immutable_file_response(
+  path: Path, media_type: str, request: Request | None = None, *,
+  cache_control: str = IMMUTABLE_PUBLIC, etag: str | None = None,
+) -> Response:
+  """Serve an image whose URL never changes content; revalidation gets a 304."""
+  stat = path.stat()
+  etag = etag or f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"'
+  headers = {
+    "Cache-Control": cache_control,
+    "ETag": etag,
+    "X-Content-Type-Options": "nosniff",
+  }
+  if request is not None and _not_modified(request, etag, stat.st_mtime):
+    return Response(status_code=304, headers=headers)
+  return FileResponse(str(path), media_type=media_type, headers=headers)
+
+
+async def refresh_member_avatar(store: CommonPublicStore, host: str) -> None:
+  """Copy a registered member's public avatar into the host's shared cache.
+
+  Members list themselves in the public directory by choice and already serve
+  this avatar publicly from their own instance. Holding one re-encoded copy
+  here under its content hash lets every viewer's instance fetch it from this
+  host once, instead of from each member's own, possibly slow, server.
+  """
+  try:
+    response = await federation_request(
+      "GET", peer_service_url(host, "avatar"),
+      max_response_bytes=MAX_AVATAR_BYTES, response_format="binary",
+      timeout_seconds=min(OUTBOUND_TIMEOUT_S, 10.0),
+    )
+  except Exception as exc:
+    logging.getLogger("social").warning("Member avatar not refreshed: %s", exc)
+    store.keep_member_avatar(host)
+    return
+  if response.status_code == 404:
+    store.set_member_avatar(host, None)
+    return
+  if response.status_code != 200 or not response.content:
+    store.keep_member_avatar(host)
+    return
+  try:
+    _mime, rendition = await asyncio.to_thread(
+      image_thumbnail_bytes, response.content,
+      MEMBER_AVATAR_MAX_SIDE, MEMBER_AVATAR_MAX_PIXELS,
+    )
+  except Exception as exc:
+    logging.getLogger("social").warning("Member avatar was not a usable image: %s", exc)
+    store.keep_member_avatar(host)
+    return
+  store.set_member_avatar(host, rendition)
+
+
 def read_board_page(
   store: CommonPublicStore, limit: int, before: str | None,
   viewer: str | None = None,
@@ -944,7 +1136,9 @@ def read_board_page(
   page_size = min(max(limit, 1), BOARD_PAGE_LIMIT)
   posts = store.read_board(page_size + 1, cursor, viewer)
   has_more = len(posts) > page_size
-  posts = posts[:page_size]
+  posts = store.with_member_avatars(posts[:page_size])
+  for post in posts:
+    store.with_member_avatars(post.get("reply_authors") or [])
   next_cursor = None
   if has_more and posts:
     last = posts[-1]
@@ -992,14 +1186,15 @@ async def send_board_activity(
 
 def create_public_router(
   store: CommonPublicStore, verifier: ActorVerifier, *, prefix: str = "",
-  on_activity=None,
+  on_activity=None, on_register=None,
 ) -> tuple[APIRouter, None]:
   """Build the community host's public directory and board surface.
 
   ``on_activity(kind, author_host, actor_host, actor_handle, post_id)`` is an
   optional awaitable the host calls after a genuine new like or reply by
   someone other than the author, so it can tell the author's instance. It never
-  changes the peer-facing response.
+  changes the peer-facing response. ``on_register(host)`` is likewise awaited
+  after each directory registration (the host refreshes the member's avatar).
   """
   router = APIRouter(prefix=prefix, tags=["common-public"])
 
@@ -1020,7 +1215,19 @@ def create_public_router(
       or not isinstance(bio, str) or len(bio) > MAX_BIO_CHARS
     ):
       raise HTTPException(status_code=400, detail="Directory profile is invalid.")
-    return store.register(envelope["from"], handle, bio)
+    registered = store.register(envelope["from"], handle, bio)
+    if on_register is not None:
+      await on_register(envelope["from"])
+    return registered
+
+  @router.get("/directory/avatars/{name}")
+  def get_member_avatar(name: str, request: Request):
+    path = store.member_avatar_file(name)
+    if path is None:
+      raise HTTPException(status_code=404, detail="Avatar not found.")
+    return immutable_file_response(
+      path, "image/webp", request, etag=f'"{path.stem}"',
+    )
 
   @router.get("/board")
   def get_board(
@@ -1031,32 +1238,32 @@ def create_public_router(
     return read_board_page(store, limit, before, viewer)
 
   @router.get("/board/media/{post_id}")
-  def get_board_media(post_id: str):
+  def get_board_media(post_id: str, request: Request):
     if not valid_id(post_id):
       raise HTTPException(status_code=400, detail="Post id is invalid.")
-    return store.serve_image(store.board_image(post_id))
+    return store.serve_image(store.board_image(post_id), request)
 
   @router.get("/board/media/{post_id}/{index}")
-  def get_board_media_at(post_id: str, index: int):
+  def get_board_media_at(post_id: str, index: int, request: Request):
     if not valid_id(post_id):
       raise HTTPException(status_code=400, detail="Post id is invalid.")
     if not 0 <= index < MAX_BOARD_ATTACHMENTS:
       raise HTTPException(status_code=400, detail="Image index is invalid.")
-    return store.serve_image(store.board_image(post_id, index))
+    return store.serve_image(store.board_image(post_id, index), request)
 
   @router.get("/board/thumbnail/{post_id}")
-  def get_board_thumbnail(post_id: str):
+  def get_board_thumbnail(post_id: str, request: Request):
     if not valid_id(post_id):
       raise HTTPException(status_code=400, detail="Post id is invalid.")
-    return store.serve_image(store.board_thumbnail(post_id))
+    return store.serve_image(store.board_thumbnail(post_id), request)
 
   @router.get("/board/thumbnail/{post_id}/{index}")
-  def get_board_thumbnail_at(post_id: str, index: int):
+  def get_board_thumbnail_at(post_id: str, index: int, request: Request):
     if not valid_id(post_id):
       raise HTTPException(status_code=400, detail="Post id is invalid.")
     if not 0 <= index < MAX_BOARD_ATTACHMENTS:
       raise HTTPException(status_code=400, detail="Image index is invalid.")
-    return store.serve_image(store.board_thumbnail(post_id, index))
+    return store.serve_image(store.board_thumbnail(post_id, index), request)
 
   @router.get("/board/{post_id}/replies")
   def get_board_replies(post_id: str):
