@@ -60,7 +60,7 @@ test('24 counted reactions and the inline picker stay inside a phone viewport', 
     </style>
     <main class="phone">
       <div class="cn-post-actions">
-        <div class="cn-reactions has-picker" aria-label="Post reactions">
+        <div class="cn-reactions" aria-label="Post reactions">
           ${reactions}
           <button class="cn-react cn-add-reaction" aria-label="Add reaction">+</button>
           <div class="cn-reaction-picker" role="group" aria-label="Choose a reaction">
@@ -83,11 +83,15 @@ test('24 counted reactions and the inline picker stay inside a phone viewport', 
         const picker = document.querySelector('.cn-reaction-picker').getBoundingClientRect()
         const chips = [...document.querySelectorAll('.cn-reaction-chip')].map(node => node.getBoundingClientRect())
         const choices = [...document.querySelectorAll('.cn-reaction-grid button')].map(node => node.getBoundingClientRect())
+        const add = document.querySelector('.cn-add-reaction').getBoundingClientRect()
+        const actions = document.querySelector('.cn-post-actions').getBoundingClientRect()
         window.document.querySelector('#result').textContent = JSON.stringify({
           viewportWidth: view.innerWidth,
           picker: { left: picker.left, right: picker.right, top: picker.top, bottom: picker.bottom, width: picker.width },
           firstChipTop: chips[0].top,
           lastChipTop: chips.at(-1).top,
+          rowBottom: Math.max(add.bottom, ...chips.map(chip => chip.bottom)),
+          actionsBottom: actions.bottom,
           scrollWidth: document.documentElement.scrollWidth,
           clientWidth: document.documentElement.clientWidth,
           choiceSizes: choices.map(({ width, height }) => [width, height]),
@@ -114,6 +118,14 @@ test('24 counted reactions and the inline picker stay inside a phone viewport', 
     assert.equal(geometry.viewportWidth, 320)
     assert.ok(geometry.lastChipTop > geometry.firstChipTop, 'all 24 counted reactions wrap')
     assert.ok(geometry.picker.top >= 0, 'a first-post picker stays below the phone’s top edge')
+    assert.ok(
+      geometry.picker.top >= geometry.rowBottom,
+      'the picker opens below the reactions instead of beside them',
+    )
+    assert.ok(
+      Math.abs(geometry.actionsBottom - geometry.rowBottom) <= 1,
+      'the open picker floats over what follows instead of pushing it down',
+    )
     assert.ok(geometry.picker.left >= 0, 'picker stays inside the phone’s left edge')
     assert.ok(geometry.picker.right <= geometry.viewportWidth, 'picker stays inside the phone’s right edge')
     assert.equal(geometry.scrollWidth, geometry.clientWidth, 'picker does not create horizontal overflow')

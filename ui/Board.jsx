@@ -1009,7 +1009,7 @@ export default function Board({
                   )}
                   <span>{replyActionLabel(replyCount)}</span>
                 </button>
-                <div className={`cn-reactions${reactionPickerFor === post.id ? ' has-picker' : ''}`}
+                <div className="cn-reactions"
                      aria-label="Post reactions">
                   {visibleReactions.map((emoji) => (
                     <button key={emoji} id={!emojiReactions && emoji === '❤️' ? `cn-react-${post.id}` : undefined}
