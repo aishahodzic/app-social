@@ -82,7 +82,6 @@ MEMBER_AVATAR_MAX_PIXELS = 8_000_000
 # The host re-copies each member's avatar at least this often, so a member
 # whose instance never re-registers still shows a current picture.
 MEMBER_AVATAR_MAX_AGE_S = 24 * 3600
-MEMBER_UNNAMED_RECHECK_S = 5 * 60
 AVATAR_DIGEST = re.compile(r"[0-9a-f]{64}")
 # A host never silently deletes public/user data.  These admission ceilings
 # bound durable abuse instead: an operator can raise them after provisioning
@@ -598,6 +597,8 @@ class CommonPublicStore:
 
   def set_member_handle(self, host: str, handle: str) -> None:
     """Record the handle a registered member's own actor card now shows."""
+    if self._member_index()[1].get(host) == handle:
+      return
     with self._mutation_lock(self._directory_lock, "directory"):
       path = self.directory_path()
       entries = self._load_object(path)
@@ -651,7 +652,7 @@ class CommonPublicStore:
     return digest
 
   def members_due_for_avatar_check(self, limit: int, now: float | None = None) -> list[str]:
-    """Refresh named members daily and unnamed members promptly, oldest first."""
+    """Members whose avatar copy is older than a day (or was never made)."""
     now = time.time() if now is None else now
     try:
       entries = self._load_object(self.directory_path())
@@ -661,9 +662,7 @@ class CommonPublicStore:
       (float(entry.get("avatar_checked_at") or 0), host)
       for host, entry in entries.items()
       if isinstance(host, str) and isinstance(entry, dict)
-      and now - float(entry.get("avatar_checked_at") or 0) >= (
-        MEMBER_AVATAR_MAX_AGE_S if entry.get("handle") else MEMBER_UNNAMED_RECHECK_S
-      )
+      and now - float(entry.get("avatar_checked_at") or 0) >= MEMBER_AVATAR_MAX_AGE_S
     )
     return [host for _checked, host in due[:limit]]
 
@@ -1265,12 +1264,16 @@ async def send_board_activity(
     logging.getLogger("social").warning("Board activity not delivered: %s", exc)
 
 
-async def verify_named_member(verifier: ActorVerifier, envelope: dict) -> dict:
+async def verify_named_member(
+  store: CommonPublicStore, verifier: ActorVerifier, envelope: dict,
+) -> dict:
   """Verify a public write whose author must be named by a handle.
 
   Everything on the board and in the directory is shown by handle, so a member
   without one cannot join or take part. A cached card can predate a handle the
   member has just chosen, so an unnamed card is re-read once before refusing.
+  The verified handle is the member's current name, so the directory takes it
+  here; every row by them follows without waiting for a sweep.
   """
   actor = await verifier.verify_envelope(envelope)
   if not actor.get("handle"):
@@ -1281,6 +1284,7 @@ async def verify_named_member(verifier: ActorVerifier, envelope: dict) -> dict:
       raise HTTPException(status_code=409, detail=NEEDS_USERNAME) from None
     if not actor.get("handle"):
       raise HTTPException(status_code=409, detail=NEEDS_USERNAME)
+  store.set_member_handle(envelope["from"], actor["handle"])
   return actor
 
 
@@ -1307,7 +1311,7 @@ def create_public_router(
     envelope = await read_envelope(request)
     if envelope.get("v") != 0 or envelope.get("type") != "register":
       raise HTTPException(status_code=400, detail="Unsupported envelope type.")
-    actor = await verify_named_member(verifier, envelope)
+    actor = await verify_named_member(store, verifier, envelope)
     handle = actor["handle"]
     bio = envelope.get("bio") or ""
     if (
@@ -1400,7 +1404,7 @@ def create_public_router(
     post_id = envelope.get("post_id")
     if not valid_id(post_id):
       raise HTTPException(status_code=400, detail="Post id is invalid.")
-    actor = await verify_named_member(verifier, envelope)
+    actor = await verify_named_member(store, verifier, envelope)
     replay_token = hashlib.sha256(canonical(envelope)).hexdigest()
     emoji = envelope.get("emoji")
     result = (
@@ -1435,7 +1439,7 @@ def create_public_router(
       or len(text) > MAX_REPLY_TEXT_CHARS
     ):
       raise HTTPException(status_code=400, detail="Reply text is invalid.")
-    actor = await verify_named_member(verifier, envelope)
+    actor = await verify_named_member(store, verifier, envelope)
     result = store.add_reply(
       post_id, reply_id, envelope["from"], actor["handle"],
       text, envelope["sent_at"],
@@ -1478,7 +1482,7 @@ def create_public_router(
     post_id = envelope.get("id")
     if not valid_id(post_id):
       raise HTTPException(status_code=400, detail="Post id is invalid.")
-    actor = await verify_named_member(verifier, envelope)
+    actor = await verify_named_member(store, verifier, envelope)
     store.store_post({
       "id": post_id,
       "host": envelope["from"],

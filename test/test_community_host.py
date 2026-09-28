@@ -287,29 +287,42 @@ class CommunityHostTests(unittest.TestCase):
       store.register("old.example", "old", "bio")
       self.assertIn("old.example", store.members_due_for_avatar_check(10, now=1_000.0 + day))
 
-  def test_unnamed_members_are_hidden_and_rechecked_within_minutes(self):
+  def test_unnamed_members_are_hidden_from_the_directory(self):
     with tempfile.TemporaryDirectory() as data_dir:
       store = common_public.CommonPublicStore(data_dir)
       store.register("unnamed.example", "", "")
       store.register("named.example", "named", "")
-      with patch.object(common_public.time, "time", return_value=1_000.0):
-        store.keep_member_avatar("unnamed.example")
-        store.keep_member_avatar("named.example")
       self.assertEqual(
         [user["host"] for user in store.search_directory("")["users"]],
         ["named.example"],
       )
-      self.assertEqual(store.members_due_for_avatar_check(1, now=1_299.0), [])
-      self.assertEqual(
-        store.members_due_for_avatar_check(1, now=1_300.0),
-        ["unnamed.example"],
-      )
-      store.set_member_handle("unnamed.example", "chosen")
-      self.assertEqual(store.members_due_for_avatar_check(1, now=1_300.0), [])
-      self.assertEqual(
-        [user["handle"] for user in store.search_directory("chosen")["users"]],
-        ["chosen"],
-      )
+
+  def test_a_members_post_gives_the_directory_their_current_handle(self):
+    # A member who joined before handles were required keeps an unnamed
+    # directory entry until the host sees their named actor card; their
+    # next verified post is that moment, so older rows follow at once.
+    with tempfile.TemporaryDirectory() as data_dir:
+      member = _peer(Path(data_dir), "member.example")
+      store = common_public.CommonPublicStore(data_dir)
+      store.register("member.example", "", "")
+      store.store_post({
+        "id": str(uuid.uuid4()), "host": "member.example", "handle": "",
+        "text": "Before", "created_at": time.time() - 60, "replies": [],
+      }, None, None, None)
+      with (
+        patch.object(community_host, "refresh_member_profile", new=AsyncMock()),
+        TestClient(community_host.create_app(data_dir)) as client,
+      ):
+        self.assertEqual(client.get("/api/common/board").json()["posts"], [])
+        client.post("/api/common/board", json=_signed(member, {
+          "v": 0, "type": "board_post", "id": str(uuid.uuid4()),
+          "from": "member.example", "text": "After", "sent_at": time.time(),
+        })).raise_for_status()
+        posts = client.get("/api/common/board").json()["posts"]
+    self.assertEqual(
+      [(post["text"], post["handle"]) for post in posts],
+      [("After", "member"), ("Before", "member")],
+    )
 
   def test_board_rows_name_author_and_reply_author_avatars(self):
     with tempfile.TemporaryDirectory() as data_dir:
