@@ -52,7 +52,8 @@ class PublicBoardIndexTests(unittest.TestCase):
     ]
     for filename, fields in records:
       (store.board_dir() / f"{filename}.json").write_text(json.dumps({
-        "host": "author.example", "text": filename, "replies": [], **fields,
+        "host": "author.example", "handle": "author", "text": filename,
+        "replies": [], **fields,
       }))
 
   def _collect_cursor_pages(self, store, *, force_file_fallback=False):
@@ -314,7 +315,7 @@ class PublicBoardIndexTests(unittest.TestCase):
       store = CommonPublicStore(directory)
       for post_id in ("same-a", "same-b", "same-c"):
         store.store_post({
-          "id": post_id, "host": "author.example", "text": post_id,
+          "id": post_id, "host": "author.example", "handle": "author", "text": post_id,
           "created_at": 10.0, "replies": [],
         })
       app = FastAPI()
@@ -361,7 +362,7 @@ class PublicBoardIndexTests(unittest.TestCase):
         ("new", 1.0), ("normalized", float("inf")), ("old", -1.0),
       ):
         store.store_post({
-          "id": post_id, "host": "author.example", "text": post_id,
+          "id": post_id, "host": "author.example", "handle": "author", "text": post_id,
           "created_at": created_at, "replies": [],
         })
       app = FastAPI()

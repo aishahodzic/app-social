@@ -32,7 +32,7 @@ SERVICE_NAME = "mobius-social"
 # before copies existed, or before they chose a handle).
 AVATAR_REFRESH_CONCURRENCY = 4
 AVATAR_SWEEP_FIRST_DELAY_S = 60
-AVATAR_SWEEP_INTERVAL_S = 15 * 60
+AVATAR_SWEEP_INTERVAL_S = 5 * 60
 AVATAR_SWEEP_BATCH = 25
 DEVELOPMENT_REVISION = "development"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
