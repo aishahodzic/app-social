@@ -48,6 +48,7 @@ from common_protocol import (
   MAX_NAME_CHARS,
   MAX_POST_TEXT_CHARS,
   MAX_REPLY_TEXT_CHARS,
+  NEEDS_USERNAME,
   OUTBOUND_TIMEOUT_S,
   ActorVerifier,
   canonical,
@@ -195,7 +196,9 @@ class CommonPublicStore:
     self._board_lock = threading.Lock()
     self._board_index_lock = threading.Lock()
     self._board_index_ready = False
-    self._member_avatar_cache: tuple[tuple[int, int], dict[str, str]] | None = None
+    self._member_index_cache: (
+      tuple[tuple[int, int], tuple[dict[str, str], dict[str, str]]] | None
+    ) = None
 
   def data_dir(self) -> Path:
     value = self._data_dir() if callable(self._data_dir) else self._data_dir
@@ -556,32 +559,52 @@ class CommonPublicStore:
     path = self.member_avatar_dir() / f"{digest}.webp"
     return path if path.is_file() else None
 
-  def member_avatars(self) -> dict[str, str]:
-    """Map each directory member's host to its avatar content hash."""
+  def _member_index(self) -> tuple[dict[str, str], dict[str, str]]:
+    """Each directory member's current (avatar hash, handle), by host."""
     path = self.directory_path()
     try:
       stat = path.stat()
     except FileNotFoundError:
-      return {}
+      return {}, {}
     version = (stat.st_mtime_ns, stat.st_size)
-    cached = self._member_avatar_cache
+    cached = self._member_index_cache
     if cached is not None and cached[0] == version:
       return cached[1]
     try:
       entries = self._load_object(path)
     except HTTPException:
-      # Avatar hashes are an optimization; a damaged directory must not
+      # Directory overlays are an optimization; a damaged directory must not
       # take board reads down with it.
-      return {}
-    avatars = {
-      host: entry["avatar"]
-      for host, entry in entries.items()
+      return {}, {}
+    members = [
+      (host, entry) for host, entry in entries.items()
       if isinstance(host, str) and isinstance(entry, dict)
-      and isinstance(entry.get("avatar"), str)
-      and AVATAR_DIGEST.fullmatch(entry["avatar"])
+    ]
+    avatars = {
+      host: entry["avatar"] for host, entry in members
+      if isinstance(entry.get("avatar"), str) and AVATAR_DIGEST.fullmatch(entry["avatar"])
     }
-    self._member_avatar_cache = (version, avatars)
-    return avatars
+    handles = {
+      host: entry["handle"] for host, entry in members
+      if isinstance(entry.get("handle"), str) and entry["handle"]
+    }
+    self._member_index_cache = (version, (avatars, handles))
+    return avatars, handles
+
+  def member_avatars(self) -> dict[str, str]:
+    """Map each directory member's host to its avatar content hash."""
+    return self._member_index()[0]
+
+  def set_member_handle(self, host: str, handle: str) -> None:
+    """Record the handle a registered member's own actor card now shows."""
+    with self._mutation_lock(self._directory_lock, "directory"):
+      path = self.directory_path()
+      entries = self._load_object(path)
+      entry = entries.get(host)
+      if not isinstance(entry, dict) or entry.get("handle") == handle:
+        return
+      entry["handle"] = handle
+      atomic_write(path, json.dumps(entries, indent=2))
 
   def set_member_avatar(self, host: str, rendition: bytes | None) -> str | None:
     """Record a registered member's avatar copy (None: they have none).
@@ -641,13 +664,23 @@ class CommonPublicStore:
     )
     return [host for _checked, host in due[:limit]]
 
-  def with_member_avatars(self, people: list) -> list:
-    """Add each listed person's avatar hash so viewers can reuse one image."""
-    avatars = self.member_avatars()
-    if avatars:
-      for person in people:
-        if isinstance(person, dict) and avatars.get(person.get("host")):
-          person["avatar"] = avatars[person["host"]]
+  def with_member_profiles(self, people: list) -> list:
+    """Show each listed person as the directory knows them now.
+
+    Posts and replies keep the handle their author had when they were sent,
+    which is empty for someone who posted before choosing one. The directory
+    follows each member's own actor card, so its handle wins when it has one;
+    the avatar hash lets viewers reuse one shared image.
+    """
+    avatars, handles = self._member_index()
+    for person in people:
+      if not isinstance(person, dict):
+        continue
+      host = person.get("host")
+      if avatars.get(host):
+        person["avatar"] = avatars[host]
+      if handles.get(host):
+        person["handle"] = handles[host]
     return people
 
   def search_directory(self, query: str = "") -> dict:
@@ -668,7 +701,7 @@ class CommonPublicStore:
         result["bio"] = bio
       results.append(result)
     results.sort(key=lambda entry: (entry.get("handle") or entry["host"]).lower())
-    return {"users": self.with_member_avatars(results[:200])}
+    return {"users": self.with_member_profiles(results[:200])}
 
   def register(self, host: str, handle: str, bio: str) -> dict:
     with self._mutation_lock(self._directory_lock, "directory"):
@@ -974,7 +1007,7 @@ class CommonPublicStore:
     if not isinstance(replies, list):
       replies = []
     return {
-      "replies": self.with_member_avatars(sorted(
+      "replies": self.with_member_profiles(sorted(
         replies,
         key=lambda reply: reply.get("created_at", 0) if isinstance(reply, dict) else 0,
       ))
@@ -1106,14 +1139,28 @@ def immutable_file_response(
   return FileResponse(str(path), media_type=media_type, headers=headers)
 
 
-async def refresh_member_avatar(store: CommonPublicStore, host: str) -> None:
-  """Copy a registered member's public avatar into the host's shared cache.
+async def refresh_member_profile(
+  store: CommonPublicStore, verifier: ActorVerifier, host: str,
+) -> None:
+  """Refresh a registered member's handle and shared avatar copy.
+
+  An instance registers once when its owner joins, which can be before they
+  choose a handle, and older versions never register again. Re-reading the
+  member's own actor card keeps the directory's handle, and so every board
+  row by them, current without waiting for their instance to re-register.
 
   Members list themselves in the public directory by choice and already serve
   this avatar publicly from their own instance. Holding one re-encoded copy
   here under its content hash lets every viewer's instance fetch it from this
   host once, instead of from each member's own, possibly slow, server.
   """
+  try:
+    actor = await verifier.fetch_actor(host, force=True)
+  except HTTPException as exc:
+    logging.getLogger("social").warning("Member handle not refreshed: %s", exc.detail)
+  else:
+    if actor.get("handle"):
+      store.set_member_handle(host, actor["handle"])
   try:
     response = await federation_request(
       "GET", peer_service_url(host, "avatar"),
@@ -1154,9 +1201,9 @@ def read_board_page(
   page_size = min(max(limit, 1), BOARD_PAGE_LIMIT)
   posts = store.read_board(page_size + 1, cursor, viewer)
   has_more = len(posts) > page_size
-  posts = store.with_member_avatars(posts[:page_size])
+  posts = store.with_member_profiles(posts[:page_size])
   for post in posts:
-    store.with_member_avatars(post.get("reply_authors") or [])
+    store.with_member_profiles(post.get("reply_authors") or [])
   next_cursor = None
   if has_more and posts:
     last = posts[-1]
@@ -1202,6 +1249,20 @@ async def send_board_activity(
     logging.getLogger("social").warning("Board activity not delivered: %s", exc)
 
 
+async def verify_named_member(verifier: ActorVerifier, envelope: dict) -> dict:
+  """Verify a public write whose author must be named by a handle.
+
+  Everything on the board and in the directory is shown by handle, so a member
+  without one cannot join or take part. A member who has just chosen one
+  re-registers, and registration re-reads their actor card, so the cached card
+  catches up without a second fetch here.
+  """
+  actor = await verifier.verify_envelope(envelope)
+  if not actor.get("handle"):
+    raise HTTPException(status_code=409, detail=NEEDS_USERNAME)
+  return actor
+
+
 def create_public_router(
   store: CommonPublicStore, verifier: ActorVerifier, *, prefix: str = "",
   on_activity=None, on_register=None,
@@ -1227,6 +1288,8 @@ def create_public_router(
       raise HTTPException(status_code=400, detail="Unsupported envelope type.")
     actor = await verifier.verify_envelope(envelope)
     handle = envelope.get("handle") or actor.get("handle") or ""
+    if not handle:
+      raise HTTPException(status_code=409, detail=NEEDS_USERNAME)
     bio = envelope.get("bio") or ""
     if (
       not isinstance(handle, str) or len(handle) > MAX_NAME_CHARS
@@ -1318,7 +1381,7 @@ def create_public_router(
     post_id = envelope.get("post_id")
     if not valid_id(post_id):
       raise HTTPException(status_code=400, detail="Post id is invalid.")
-    actor = await verifier.verify_envelope(envelope)
+    actor = await verify_named_member(verifier, envelope)
     replay_token = hashlib.sha256(canonical(envelope)).hexdigest()
     emoji = envelope.get("emoji")
     result = (
@@ -1353,9 +1416,9 @@ def create_public_router(
       or len(text) > MAX_REPLY_TEXT_CHARS
     ):
       raise HTTPException(status_code=400, detail="Reply text is invalid.")
-    actor = await verifier.verify_envelope(envelope)
+    actor = await verify_named_member(verifier, envelope)
     result = store.add_reply(
-      post_id, reply_id, envelope["from"], actor.get("handle") or "",
+      post_id, reply_id, envelope["from"], actor["handle"],
       text, envelope["sent_at"],
     )
     author_host = result.pop("author_host", None)
@@ -1396,11 +1459,11 @@ def create_public_router(
     post_id = envelope.get("id")
     if not valid_id(post_id):
       raise HTTPException(status_code=400, detail="Post id is invalid.")
-    actor = await verifier.verify_envelope(envelope)
+    actor = await verify_named_member(verifier, envelope)
     store.store_post({
       "id": post_id,
       "host": envelope["from"],
-      "handle": actor.get("handle") or "",
+      "handle": actor["handle"],
       "text": text,
       "created_at": envelope["sent_at"],
       "replies": [],

@@ -180,7 +180,7 @@ export const CSS = `
 .cn-pending-gallery img { width: 100%; height: 100%; display: block; object-fit: cover; }
 
 /* Reactions + compose */
-.cn-post-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 4px 0 0 -8px; max-width: 460px; }
+.cn-post-actions { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 4px 0 0 -8px; max-width: 460px; }
 .cn-react {
   display: inline-flex; align-items: center; gap: 6px;
   min-height: 44px; min-width: 44px; padding: 0 12px; border-radius: 8px;
@@ -197,7 +197,6 @@ export const CSS = `
   display: flex; flex: 1 1 180px; flex-wrap: wrap;
   align-items: center; gap: 5px; min-width: 0;
 }
-.cn-reactions.has-picker { flex-basis: 100%; }
 .cn-reaction-chip {
   box-sizing: border-box; width: auto; min-width: 44px; height: 44px; padding: 0; border-radius: 10px;
   display: inline-flex; align-items: center; justify-content: center; gap: 5px;
@@ -221,10 +220,14 @@ export const CSS = `
 .cn-reaction-chip .cn-flat-emoji { width: 17px; height: 17px; }
 .cn-reaction-chip b { font: inherit; }
 .cn-add-reaction svg { width: 18px; height: 18px; }
+/* The picker floats just under the action row, over the posts below, so
+   opening it moves nothing. It opens downward: opening upward hid the first
+   post's choices above the top of the feed. */
 .cn-reaction-picker {
-  flex: 0 0 auto; width: max-content; max-width: 100%; padding: 10px; margin-top: 4px;
+  position: absolute; z-index: 30; left: 0; top: calc(100% + 6px);
+  width: max-content; max-width: 100%; padding: 10px;
   background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
-  box-shadow: none;
+  box-shadow: 0 12px 32px color-mix(in srgb, #000 38%, transparent);
   animation: cn-reaction-in .16s cubic-bezier(.2,.8,.2,1) both;
 }
 .cn-reaction-picker-title {
@@ -818,6 +821,7 @@ export const CSS = `
 .cn-intent-notice span { margin-top: 3px; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
 .cn-intent-notice .cn-btn { flex: 0 0 auto; }
 .cn-intent-notice.is-error { color: var(--danger); }
+.cn-intent-actions { display: flex; flex: 0 0 auto; gap: 6px; }
 
 /* mobius-ui:Sheet v1 — keep in sync; library candidate. Diverge below the marker only. */
 .cn-scrim {
@@ -1066,6 +1070,7 @@ export const CSS = `
   .cn-welcome-actions .cn-btn { flex: 1 1 auto; }
   .cn-intent-notice { align-items: stretch; flex-direction: column; }
   .cn-intent-notice .cn-btn { width: 100%; }
+  .cn-intent-actions .cn-btn { flex: 1 1 0; width: auto; }
   .cn-reply-composer.is-gated input { flex-basis: 100%; }
   .cn-reply-account { width: 100%; }
   .cn-profile-preview { grid-template-columns: 1fr; }

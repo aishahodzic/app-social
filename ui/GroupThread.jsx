@@ -10,7 +10,7 @@ import {
 import { GroupAvatar } from './Messages.jsx'
 import { Avatar } from './Board.jsx'
 import MessageBubble, { ReplyTarget, replyTargetFor } from './MessageBubble.jsx'
-import MessageInput from './MessageInput.jsx'
+import MessageInput, { keepMessageFocus } from './MessageInput.jsx'
 import GroupDetails from './GroupDetails.jsx'
 import { prepareImage, SelectedImageStrip } from './Media.jsx'
 import {
@@ -230,7 +230,7 @@ export default function GroupThread({
       const rejectedBeforeSave = isDefinitePrecommitRejection(error)
       if (rejectedBeforeSave) {
         updateMessages((prior) => (prior || []).filter((message) => message.id !== optimisticId))
-        setDraft(text)
+        setDraft((current) => (current.trim() ? `${text}\n${current}` : text))
         setSelectedImage(image)
         setReplyTarget(reply)
         showToast(
@@ -373,8 +373,8 @@ export default function GroupThread({
             {processingImage ? <span className="cn-spinner" /> : <ImageSquare aria-hidden="true" />}
           </button>
           <MessageInput inputRef={inputRef} value={draft} onChange={setDraft}
-                        disabled={sending || processingImage} />
-          <button className="cn-send" type="submit"
+                        disabled={processingImage} />
+          <button className="cn-send" type="submit" onMouseDown={keepMessageFocus}
                   disabled={sending || processingImage || (!draft.trim() && !selectedImage)} aria-label="Send">
             <ArrowUp />
           </button>

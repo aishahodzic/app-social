@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs'
 import { setToken, postReply } from '../api.js'
 import {
   PARTICIPATION_INTENT_PATH, accountHandoff, clearParticipationIntent,
-  createParticipationIntent, loadParticipationIntent, participationStep,
+  createParticipationIntent, loadParticipationIntent, participationActionLabel, participationStep,
   participationIntentMatches, saveParticipationIntent,
 } from '../participation.js'
 
@@ -69,10 +69,18 @@ test('a missing Identity installation opens its exact Store listing', () => {
 test('participation keeps account linking, directory consent and final action separate', () => {
   assert.equal(participationStep({ connected: false, joined: false }), 'store')
   assert.equal(participationStep({ connected: false, joined: false, identity_app_id: 8 }), 'identity')
-  assert.equal(participationStep({ connected: true, joined: false, name: 'Ada' }), 'join')
+  assert.equal(participationStep({ connected: true, joined: false, name: 'Ada', handle: 'ada' }), 'join')
   assert.equal(participationStep({
-    connected: true, joined: true, name: 'Ada',
+    connected: true, joined: true, name: 'Ada', handle: 'ada',
   }), 'ready')
+})
+
+test('a linked account without a username chooses one before taking part', () => {
+  const unnamed = { connected: true, name: 'Ada', handle: '', identity_app_id: 8 }
+  assert.equal(participationStep({ ...unnamed, joined: false }), 'username')
+  // Members who joined before usernames were required are asked too.
+  assert.equal(participationStep({ ...unnamed, joined: true }), 'username')
+  assert.equal(participationActionLabel('username'), 'Choose a username')
 })
 
 test('only explicit completion clears a pending action', async () => {
@@ -91,6 +99,12 @@ test('posting a different draft cannot consume the preserved one', () => {
   assert.equal(participationIntentMatches(
     pending, createParticipationIntent('post', { text: 'Keep this' }),
   ), true)
+})
+
+test('a tap before the profile loads is never saved as a sign-up draft', () => {
+  const source = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
+  const body = source.slice(source.indexOf('async function continueParticipation'))
+  assert.ok(body.indexOf('if (!me)') < body.indexOf('onRequestParticipation(intent)'))
 })
 
 test('public board and directory render independently from global-directory membership', () => {

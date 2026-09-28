@@ -171,6 +171,7 @@ class FederationTransportTests(unittest.IsolatedAsyncioTestCase):
       "denied", request=request, response=httpx.Response(403, request=request),
     )
     self.assertIn("rejected", social_routes._community_write_error(rejected, "reply"))
+
     self.assertIn("verify", social_routes._community_write_error(denied, "reply"))
     self.assertIn(
       "too long",

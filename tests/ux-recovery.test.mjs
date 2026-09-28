@@ -195,14 +195,17 @@ test('high-cardinality phone reactions wrap without clipping accessible controls
   assert.doesNotMatch(board, /visibleReactions\.slice/)
   assert.match(board, /aria-label=\{reactionActionLabel\(reactions\[emoji\], emoji\)\}/)
   assert.doesNotMatch(board, /className="cn-reaction-anchor"/)
-  assert.match(board, /className=\{`cn-reactions\$\{reactionPickerFor === post\.id \? ' has-picker' : ''\}`\}[\s\S]*aria-label=\{emojiReactions \? 'Add reaction' : 'Like'\}[\s\S]*className="cn-reaction-picker"/)
+  assert.match(board, /className="cn-reactions"[\s\S]*aria-label=\{emojiReactions \? 'Add reaction' : 'Like'\}[\s\S]*className="cn-reaction-picker"/)
 })
 
 test('reaction picker width fits every 44 pixel choice without horizontal spill', () => {
   const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
   const theme = readFileSync(new URL('../theme.js', import.meta.url), 'utf8')
   assert.match(theme, /\.cn-reaction-picker \{[\s\S]*width: max-content;/)
-  assert.doesNotMatch(theme, /\.cn-reaction-picker \{[^}]*position: absolute;/)
+  // It floats over the posts below and opens downward, so a first post's
+  // choices can never sit above the top of the feed.
+  assert.match(theme, /\.cn-reaction-picker \{[^}]*position: absolute;[^}]*top: calc\(100% \+ 6px\);/)
+  assert.doesNotMatch(theme, /\.cn-reaction-picker \{[^}]*bottom:/)
   assert.match(theme, /\.cn-reaction-grid \{ display: grid; grid-template-columns: repeat\(6, 44px\); gap: 3px; \}/)
   assert.match(theme, /\.cn-reaction-grid \{ grid-template-columns: repeat\(5, 44px\); \}/)
   assert.match(theme, /\.cn-reaction-grid \{ grid-template-columns: repeat\(4, 44px\); \}/)

@@ -108,9 +108,12 @@ export async function clearParticipationIntent(storage, expectedIntent) {
   return true
 }
 
+// Everything public in Social is shown by handle, so a linked account still
+// chooses a username in Möbius · You before it can join or take part.
 export function participationStep(profile) {
-  if (profile?.joined && profile?.name) return 'ready'
-  if (profile?.connected) return 'join'
+  if (profile?.joined && profile?.handle) return 'ready'
+  if (profile?.connected && profile?.handle) return 'join'
+  if (profile?.connected) return 'username'
   return profile?.identity_app_id == null ? 'store' : 'identity'
 }
 
@@ -121,6 +124,7 @@ export function participationActionLabel(step, intentKind = 'post') {
     return 'Review post'
   }
   if (step === 'join') return 'Join Social to continue'
+  if (step === 'username') return 'Choose a username'
   if (step === 'store') return 'Get Möbius · You'
   return 'Continue in Möbius · You'
 }

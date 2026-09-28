@@ -27,6 +27,9 @@ PROTOCOL = "common/0"
 PUBLIC_SERVICE_PATH = "/api/app-services/social"
 # The one shared board and directory host every Möbius browses.
 COMMUNITY_HOST = "www.mobius.you"
+# Everything public is shown by handle, so the host refuses unnamed writers
+# with this exact detail and instances recognise it.
+NEEDS_USERNAME = "Choose a username in Möbius · You before joining in."
 # Messages match Slack's 40,000-character cap. Board posts stay short because a
 # feed page carries many of them through the bounded community-host transport.
 MAX_MESSAGE_TEXT_CHARS = 40_000
@@ -419,7 +422,7 @@ __all__ = [
   "MAX_ENVELOPE_BYTES", "MAX_NAME_CHARS", "MAX_REPLY_TEXT_CHARS",
   "MAX_MESSAGE_TEXT_CHARS", "MAX_POST_TEXT_CHARS",
   "OUTBOUND_TIMEOUT_S", "SIGNED_WRITE_TIMEOUT_S",
-  "COMMUNITY_HOST", "PROTOCOL", "PUBLIC_SERVICE_PATH",
+  "COMMUNITY_HOST", "NEEDS_USERNAME", "PROTOCOL", "PUBLIC_SERVICE_PATH",
   "new_signing_key", "signing_public_key",
   "canonical", "peer_base_url", "peer_service_url", "post_signed_envelope",
   "read_envelope", "sign",
