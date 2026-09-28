@@ -82,6 +82,7 @@ MEMBER_AVATAR_MAX_PIXELS = 8_000_000
 # The host re-copies each member's avatar at least this often, so a member
 # whose instance never re-registers still shows a current picture.
 MEMBER_AVATAR_MAX_AGE_S = 24 * 3600
+MEMBER_UNNAMED_RECHECK_S = 5 * 60
 AVATAR_DIGEST = re.compile(r"[0-9a-f]{64}")
 # A host never silently deletes public/user data.  These admission ceilings
 # bound durable abuse instead: an operator can raise them after provisioning
@@ -650,7 +651,7 @@ class CommonPublicStore:
     return digest
 
   def members_due_for_avatar_check(self, limit: int, now: float | None = None) -> list[str]:
-    """Members whose avatar copy is older than a day (or was never made)."""
+    """Refresh named members daily and unnamed members promptly, oldest first."""
     now = time.time() if now is None else now
     try:
       entries = self._load_object(self.directory_path())
@@ -660,12 +661,14 @@ class CommonPublicStore:
       (float(entry.get("avatar_checked_at") or 0), host)
       for host, entry in entries.items()
       if isinstance(host, str) and isinstance(entry, dict)
-      and now - float(entry.get("avatar_checked_at") or 0) >= MEMBER_AVATAR_MAX_AGE_S
+      and now - float(entry.get("avatar_checked_at") or 0) >= (
+        MEMBER_AVATAR_MAX_AGE_S if entry.get("handle") else MEMBER_UNNAMED_RECHECK_S
+      )
     )
     return [host for _checked, host in due[:limit]]
 
   def with_member_profiles(self, people: list) -> list:
-    """Show each listed person as the directory knows them now.
+    """Show only people with a known handle, using current directory profiles.
 
     Posts and replies keep the handle their author had when they were sent,
     which is empty for someone who posted before choosing one. The directory
@@ -673,6 +676,7 @@ class CommonPublicStore:
     the avatar hash lets viewers reuse one shared image.
     """
     avatars, handles = self._member_index()
+    named = []
     for person in people:
       if not isinstance(person, dict):
         continue
@@ -681,7 +685,9 @@ class CommonPublicStore:
         person["avatar"] = avatars[host]
       if handles.get(host):
         person["handle"] = handles[host]
-    return people
+      if person.get("handle"):
+        named.append(person)
+    return named
 
   def search_directory(self, query: str = "") -> dict:
     entries = self._load_object(self.directory_path())
@@ -691,6 +697,8 @@ class CommonPublicStore:
       if not isinstance(host, str) or not isinstance(entry, dict):
         continue
       handle = entry.get("handle") if isinstance(entry.get("handle"), str) else ""
+      if not handle:
+        continue
       bio = entry.get("bio") if isinstance(entry.get("bio"), str) else ""
       if needle and needle not in f"{handle} {host} {bio}".lower():
         continue
@@ -700,7 +708,7 @@ class CommonPublicStore:
       if "bio" in entry:
         result["bio"] = bio
       results.append(result)
-    results.sort(key=lambda entry: (entry.get("handle") or entry["host"]).lower())
+    results.sort(key=lambda entry: entry["handle"].lower())
     return {"users": self.with_member_profiles(results[:200])}
 
   def register(self, host: str, handle: str, bio: str) -> dict:
@@ -1199,11 +1207,19 @@ def read_board_page(
   except ValueError as exc:
     raise HTTPException(status_code=400, detail=str(exc)) from exc
   page_size = min(max(limit, 1), BOARD_PAGE_LIMIT)
-  posts = store.read_board(page_size + 1, cursor, viewer)
+  posts = []
+  while len(posts) <= page_size:
+    batch = store.read_board(page_size + 1, cursor, viewer)
+    if not batch:
+      break
+    posts.extend(store.with_member_profiles(batch))
+    cursor = _board_record_position(batch[-1])
+    if len(batch) <= page_size:
+      break
   has_more = len(posts) > page_size
-  posts = store.with_member_profiles(posts[:page_size])
+  posts = posts[:page_size]
   for post in posts:
-    store.with_member_profiles(post.get("reply_authors") or [])
+    post["reply_authors"] = store.with_member_profiles(post.get("reply_authors") or [])
   next_cursor = None
   if has_more and posts:
     last = posts[-1]
@@ -1253,13 +1269,18 @@ async def verify_named_member(verifier: ActorVerifier, envelope: dict) -> dict:
   """Verify a public write whose author must be named by a handle.
 
   Everything on the board and in the directory is shown by handle, so a member
-  without one cannot join or take part. A member who has just chosen one
-  re-registers, and registration re-reads their actor card, so the cached card
-  catches up without a second fetch here.
+  without one cannot join or take part. A cached card can predate a handle the
+  member has just chosen, so an unnamed card is re-read once before refusing.
   """
   actor = await verifier.verify_envelope(envelope)
   if not actor.get("handle"):
-    raise HTTPException(status_code=409, detail=NEEDS_USERNAME)
+    try:
+      await verifier.fetch_actor(envelope["from"], force=True)
+      actor = await verifier.verify_envelope(envelope)
+    except HTTPException:
+      raise HTTPException(status_code=409, detail=NEEDS_USERNAME) from None
+    if not actor.get("handle"):
+      raise HTTPException(status_code=409, detail=NEEDS_USERNAME)
   return actor
 
 
@@ -1286,10 +1307,8 @@ def create_public_router(
     envelope = await read_envelope(request)
     if envelope.get("v") != 0 or envelope.get("type") != "register":
       raise HTTPException(status_code=400, detail="Unsupported envelope type.")
-    actor = await verifier.verify_envelope(envelope)
-    handle = envelope.get("handle") or actor.get("handle") or ""
-    if not handle:
-      raise HTTPException(status_code=409, detail=NEEDS_USERNAME)
+    actor = await verify_named_member(verifier, envelope)
+    handle = actor["handle"]
     bio = envelope.get("bio") or ""
     if (
       not isinstance(handle, str) or len(handle) > MAX_NAME_CHARS

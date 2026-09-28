@@ -287,6 +287,30 @@ class CommunityHostTests(unittest.TestCase):
       store.register("old.example", "old", "bio")
       self.assertIn("old.example", store.members_due_for_avatar_check(10, now=1_000.0 + day))
 
+  def test_unnamed_members_are_hidden_and_rechecked_within_minutes(self):
+    with tempfile.TemporaryDirectory() as data_dir:
+      store = common_public.CommonPublicStore(data_dir)
+      store.register("unnamed.example", "", "")
+      store.register("named.example", "named", "")
+      with patch.object(common_public.time, "time", return_value=1_000.0):
+        store.keep_member_avatar("unnamed.example")
+        store.keep_member_avatar("named.example")
+      self.assertEqual(
+        [user["host"] for user in store.search_directory("")["users"]],
+        ["named.example"],
+      )
+      self.assertEqual(store.members_due_for_avatar_check(1, now=1_299.0), [])
+      self.assertEqual(
+        store.members_due_for_avatar_check(1, now=1_300.0),
+        ["unnamed.example"],
+      )
+      store.set_member_handle("unnamed.example", "chosen")
+      self.assertEqual(store.members_due_for_avatar_check(1, now=1_300.0), [])
+      self.assertEqual(
+        [user["handle"] for user in store.search_directory("chosen")["users"]],
+        ["chosen"],
+      )
+
   def test_board_rows_name_author_and_reply_author_avatars(self):
     with tempfile.TemporaryDirectory() as data_dir:
       root = Path(data_dir)
@@ -328,7 +352,9 @@ class CommunityHostTests(unittest.TestCase):
       }, None, None, None)
       store.add_reply(post_id, str(uuid.uuid4()), "replier.example", "", "Hi", time.time())
       with TestClient(community_host.create_app(data_dir)) as client:
-        self.assertEqual(client.get("/api/common/board").json()["posts"][0]["handle"], "")
+        self.assertEqual(client.get("/api/common/board").json()["posts"], [])
+        self.assertEqual(client.get("/api/common/directory").json()["users"], [])
+        self.assertEqual(client.get(f"/api/common/board/{post_id}/replies").json()["replies"], [])
 
         cards = _ActorCards({"author.example": "ada", "replier.example": "lin"})
         with patch.object(common_public, "federation_request", new=AsyncMock(
@@ -346,6 +372,36 @@ class CommunityHostTests(unittest.TestCase):
     self.assertEqual(post["reply_authors"][0]["handle"], "lin")
     self.assertEqual(replies[0]["handle"], "lin")
     self.assertEqual([person["host"] for person in people], ["author.example"])
+
+  def test_board_pagination_skips_legacy_unnamed_posts_without_losing_named_posts(self):
+    with tempfile.TemporaryDirectory() as data_dir:
+      store = common_public.CommonPublicStore(data_dir)
+      for index, handle in enumerate(("older", "", "newer")):
+        store.store_post({
+          "id": str(uuid.uuid4()), "host": f"member{index}.example",
+          "handle": handle, "text": "Hello", "created_at": 1_000 + index,
+          "replies": [],
+        })
+      first = common_public.read_board_page(store, 1, None)
+      second = common_public.read_board_page(store, 1, first["next_cursor"])
+      self.assertEqual([post["handle"] for post in first["posts"]], ["newer"])
+      self.assertEqual([post["handle"] for post in second["posts"]], ["older"])
+      self.assertIsNone(second["next_cursor"])
+
+  def test_registration_uses_verified_actor_handle_not_envelope_claim(self):
+    with tempfile.TemporaryDirectory() as data_dir:
+      peer = _peer(Path(data_dir), "member.example")
+      with (
+        patch.object(community_host, "refresh_member_profile", new=AsyncMock()),
+        TestClient(community_host.create_app(data_dir)) as client,
+      ):
+        response = client.post("/api/common/directory", json=_signed(peer, {
+          "v": 0, "type": "register", "from": "member.example",
+          "handle": "claimed", "bio": "", "sent_at": time.time(),
+        }))
+        people = client.get("/api/common/directory").json()["users"]
+    self.assertEqual(response.status_code, 200)
+    self.assertEqual([person["handle"] for person in people], ["member"])
 
   def test_members_without_a_username_cannot_join_or_post(self):
     with tempfile.TemporaryDirectory() as data_dir:
@@ -370,7 +426,7 @@ class CommunityHostTests(unittest.TestCase):
         refused = client.post("/api/common/board", json=post())
         unlisted = client.post("/api/common/directory", json=_signed(member, {
           "v": 0, "type": "register", "from": "member.example",
-          "handle": "", "bio": "", "sent_at": time.time(),
+          "handle": "claimed", "bio": "", "sent_at": time.time(),
         }))
         # Re-registering with a new handle re-reads the card; once it has
         # the handle, the same member can post under it.
