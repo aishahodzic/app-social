@@ -36,11 +36,14 @@ test('closing a profile invalidates its request instead of allowing it to reopen
 })
 
 test('Social modal focus owns initial focus so it can restore the actual opener', () => {
-  for (const file of ['Board.jsx', 'People.jsx', 'Messages.jsx']) {
+  for (const file of ['Board.jsx', 'People.jsx', 'Messages.jsx', 'Media.jsx']) {
     const source = readFileSync(new URL(`../ui/${file}`, import.meta.url), 'utf8')
     assert.match(source, /useModalFocus/)
     assert.doesNotMatch(source, /autoFocus/)
   }
+  const focus = readFileSync(new URL('../ui/modalFocus.js', import.meta.url), 'utf8')
+  assert.match(focus, /event\.key === 'Escape'/)
+  assert.match(focus, /opener\.isConnected !== false/)
 })
 
 test('conversation recovery is visible and new messages do not steal the reading position', () => {
@@ -73,11 +76,21 @@ test('message text stays selectable and reply uses an explicit touch target', ()
 test('all message composers send on Enter and keep Shift+Enter for a newline', () => {
   const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
   const input = readFileSync(new URL('../ui/MessageInput.jsx', import.meta.url), 'utf8')
-  assert.match(input, /shouldSubmitMessageKey\(event\)/)
+  assert.match(input, /shouldSubmitMessageKey\(event, isTouchPrimary\)/)
+  assert.match(input, /matchMedia\?\.\(TOUCH_PRIMARY_QUERY\)\?\.matches/)
   assert.match(input, /event\.currentTarget\.form\.requestSubmit\(\)/)
   assert.doesNotMatch(input, /pointer: coarse/)
   assert.equal((board.match(/<MessageInput /g) || []).length, 2)
   assert.match(board, /<MessageInput inputRef=\{replyInputRef\} className="cn-reply-input"/)
+})
+
+test('Community explains Join at the composer and preserves the reader when history is prepended', () => {
+  const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
+  assert.match(board, /Continuing starts Join and shares your handle and profile photo\./)
+  assert.match(board, /Your draft will not be posted\./)
+  assert.match(board, /aria-describedby=\{!canInteract \? 'cn-community-join-disclosure' : undefined\}/)
+  assert.match(board, /const previousHeight = scroller\?\.scrollHeight/)
+  assert.match(board, /prependedScrollTop\(previousTop, previousHeight, scroller\.scrollHeight\)/)
 })
 
 test('Community and replies use the Möbius chat composer primitive', () => {
@@ -102,6 +115,11 @@ test('Community success actions stay quiet and image previews expose real zoom c
   assert.match(media, /aria-label="Zoom in"/)
   assert.match(media, /onWheel=\{zoomWithWheel\}/)
   assert.match(media, /onPointerMove=\{moveImage\}/)
+  assert.match(media, /setPointerCapture\?\.\(event\.pointerId\)/)
+  assert.match(media, /onPointerUp=\{endImageMove\}/)
+  assert.match(media, /onPointerCancel=\{endImageMove\}/)
+  assert.match(media, /event\.key === '\+' \|\| event\.key === '='/)
+  assert.match(media, /event\.key === '0'/)
 })
 
 test('message tabs keep one position and startup identity never flashes a label', () => {

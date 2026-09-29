@@ -1,5 +1,5 @@
 import { useLayoutEffect } from 'react'
-import { shouldSubmitMessageKey } from './interactionRules.js'
+import { shouldSubmitMessageKey, TOUCH_PRIMARY_QUERY } from './interactionRules.js'
 
 // Matches the service limit for direct and group messages.
 const MAX_MESSAGE_CHARS = 40000
@@ -25,7 +25,8 @@ export default function MessageInput({
   }, [value, inputRef, maxHeight])
 
   function onKeyDown(event) {
-    if (!shouldSubmitMessageKey(event)) return
+    const isTouchPrimary = globalThis.matchMedia?.(TOUCH_PRIMARY_QUERY)?.matches === true
+    if (!shouldSubmitMessageKey(event, isTouchPrimary)) return
     event.preventDefault()
     event.currentTarget.form.requestSubmit()
   }

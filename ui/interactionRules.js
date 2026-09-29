@@ -1,11 +1,18 @@
 export const MIN_LIGHTBOX_SCALE = 1
 export const MAX_LIGHTBOX_SCALE = 4
 export const LIGHTBOX_ZOOM_STEP = 0.25
+export const TOUCH_PRIMARY_QUERY = '(hover: none) and (pointer: coarse)'
 
-export function shouldSubmitMessageKey(event) {
+export function shouldSubmitMessageKey(event, isTouchPrimary = false) {
   return event?.key === 'Enter'
     && !event.shiftKey
+    && !event.isComposing
     && !event.nativeEvent?.isComposing
+    && Boolean(event.metaKey || event.ctrlKey || !isTouchPrimary)
+}
+
+export function prependedScrollTop(previousTop, previousHeight, nextHeight) {
+  return Number(previousTop) + Math.max(0, Number(nextHeight) - Number(previousHeight))
 }
 
 export function clampLightboxScale(value) {

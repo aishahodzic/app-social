@@ -236,6 +236,9 @@ export const CSS = `
 .cn-board-send svg path, .cn-reply-send svg path {
   stroke: currentColor; stroke-width: .24; stroke-linejoin: round;
 }
+.cn-composer-disclosure {
+  margin: 7px 4px 0 56px; color: var(--muted); font-size: 12px; line-height: 1.35;
+}
 
 /* Reactions + compose */
 .cn-post-actions { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 4px 0 0 -8px; max-width: 460px; }

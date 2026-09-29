@@ -21,6 +21,7 @@ import {
 import { EMOJI_ART } from '../emoji_art.js'
 import { boardPostFitsWireLimit } from '../board_payload.js'
 import MessageInput from './MessageInput.jsx'
+import { prependedScrollTop } from './interactionRules.js'
 
 const MAX_POST_IMAGES = 4
 const GALLERY_BUDGET_BYTES = 960 * 1024
@@ -352,10 +353,18 @@ export default function Board({
   async function loadEarlierPosts() {
     const before = feed.at(-1)?.created_at
     if (before === null || before === undefined || loadingEarlier) return
+    const scroller = bottomMarkerRef.current?.closest('.cn-scroll')
+    const previousHeight = scroller?.scrollHeight
+    const previousTop = scroller?.scrollTop
     setLoadingEarlier(true)
     setEarlierError('')
     try {
       await onLoadEarlier(before)
+      if (scroller && previousHeight !== undefined && previousTop !== undefined) {
+        requestAnimationFrame(() => {
+          scroller.scrollTop = prependedScrollTop(previousTop, previousHeight, scroller.scrollHeight)
+        })
+      }
     } catch {
       setEarlierError('Earlier posts couldn’t be loaded. The posts already here are unchanged.')
     } finally {
@@ -1183,12 +1192,18 @@ export default function Board({
                             disabled={posting || handoffBusy || participationBusy} />
               <button className="cn-board-send" type="submit"
                       disabled={posting || handoffBusy || participationBusy || (!draft.trim() && !selectedImages.length)}
+                      aria-describedby={!canInteract ? 'cn-community-join-disclosure' : undefined}
                       aria-label={canInteract ? 'Send message' : 'Continue to send message'}>
                 <ArrowUp aria-hidden="true" />
               </button>
             </div>
           </div>
         </div>
+        {!canInteract && (
+          <p id="cn-community-join-disclosure" className="cn-composer-disclosure">
+            Continuing starts Join and shares your handle and profile photo. Your draft will not be posted.
+          </p>
+        )}
       </form>
 
       {deleteTarget && (
