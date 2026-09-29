@@ -73,11 +73,10 @@ test('message text stays selectable and reply uses an explicit touch target', ()
   assert.match(theme, /\.cn-board-send svg path, \.cn-reply-send svg path \{[\s\S]*stroke-width: \.24;/)
 })
 
-test('all message composers send on Enter and keep Shift+Enter for a newline', () => {
+test('all message composers use touch-aware Enter behavior', () => {
   const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
   const input = readFileSync(new URL('../ui/MessageInput.jsx', import.meta.url), 'utf8')
-  assert.match(input, /shouldSubmitMessageKey\(event, isTouchPrimary\)/)
-  assert.match(input, /matchMedia\?\.\(TOUCH_PRIMARY_QUERY\)\?\.matches/)
+  assert.match(input, /shouldSubmitMessageKey\(event, isTouchPrimary\(\)\)/)
   assert.match(input, /event\.currentTarget\.form\.requestSubmit\(\)/)
   assert.doesNotMatch(input, /pointer: coarse/)
   assert.equal((board.match(/<MessageInput /g) || []).length, 2)

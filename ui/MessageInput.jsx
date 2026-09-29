@@ -1,5 +1,5 @@
 import { useLayoutEffect } from 'react'
-import { shouldSubmitMessageKey, TOUCH_PRIMARY_QUERY } from './interactionRules.js'
+import { isTouchPrimary, shouldSubmitMessageKey } from './interactionRules.js'
 
 // Matches the service limit for direct and group messages.
 const MAX_MESSAGE_CHARS = 40000
@@ -11,8 +11,9 @@ export function keepMessageFocus(event) {
   event.preventDefault()
 }
 
-// A multi-line message box that grows with its text. Enter sends, Shift+Enter
-// adds a line, and IME composition is never interrupted.
+// A multi-line message box that grows with its text. Physical-keyboard Enter
+// sends; touch-keyboard Enter and Shift+Enter add a line. IME composition is
+// never interrupted.
 export default function MessageInput({
   inputRef, value, onChange, disabled, className, maxLength = MAX_MESSAGE_CHARS,
   maxHeight, placeholder = 'Message', label = placeholder,
@@ -25,8 +26,7 @@ export default function MessageInput({
   }, [value, inputRef, maxHeight])
 
   function onKeyDown(event) {
-    const isTouchPrimary = globalThis.matchMedia?.(TOUCH_PRIMARY_QUERY)?.matches === true
-    if (!shouldSubmitMessageKey(event, isTouchPrimary)) return
+    if (!shouldSubmitMessageKey(event, isTouchPrimary())) return
     event.preventDefault()
     event.currentTarget.form.requestSubmit()
   }

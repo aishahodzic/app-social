@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   clampLightboxScale, MAX_LIGHTBOX_SCALE, MIN_LIGHTBOX_SCALE,
-  pinchLightboxScale, prependedScrollTop, shouldSubmitMessageKey,
+  isTouchPrimary, pinchLightboxScale, prependedScrollTop, shouldSubmitMessageKey,
   TOUCH_PRIMARY_QUERY, wheelLightboxScale,
 } from '../ui/interactionRules.js'
 
@@ -19,6 +19,28 @@ test('message keyboard rules match Möbius Chat across physical and touch keyboa
   assert.equal(shouldSubmitMessageKey({ key: 'Enter', ctrlKey: true, isComposing: true }), false)
   assert.equal(shouldSubmitMessageKey({ key: ' ', shiftKey: false, nativeEvent: {} }), false)
   assert.equal(shouldSubmitMessageKey(undefined), false)
+})
+
+test('touch detection follows the Möbius shell when the embedded app frame disagrees', () => {
+  const frame = {
+    matchMedia: () => ({ matches: false }),
+    parent: { matchMedia: () => ({ matches: true }) },
+  }
+  assert.equal(isTouchPrimary(frame), true)
+  assert.equal(isTouchPrimary({ matchMedia: () => ({ matches: false }) }), false)
+})
+
+test('touch detection recognizes phones when embedded media queries are unavailable', () => {
+  const phone = {
+    matchMedia: () => ({ matches: false }),
+    navigator: { maxTouchPoints: 5, userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0)' },
+  }
+  const touchLaptop = {
+    matchMedia: () => ({ matches: false }),
+    navigator: { maxTouchPoints: 10, userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+  }
+  assert.equal(isTouchPrimary(phone), true)
+  assert.equal(isTouchPrimary(touchLaptop), false)
 })
 
 test('prepending older messages keeps the message being read at the same viewport position', () => {

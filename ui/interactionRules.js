@@ -3,6 +3,27 @@ export const MAX_LIGHTBOX_SCALE = 4
 export const LIGHTBOX_ZOOM_STEP = 0.25
 export const TOUCH_PRIMARY_QUERY = '(hover: none) and (pointer: coarse)'
 
+function isMobileTouchDevice(scope) {
+  const navigator = scope?.navigator
+  const touchPoints = Number(navigator?.maxTouchPoints || 0)
+  if (touchPoints < 1) return false
+  if (navigator?.userAgentData?.mobile === true) return true
+  const userAgent = String(navigator?.userAgent || '')
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(userAgent)
+    || (/Macintosh/i.test(userAgent) && touchPoints > 1)
+}
+
+export function isTouchPrimary(scope = globalThis) {
+  const contexts = [scope, scope?.parent]
+  return contexts.some((context) => {
+    try {
+      return context?.matchMedia?.(TOUCH_PRIMARY_QUERY)?.matches === true
+    } catch {
+      return false
+    }
+  }) || contexts.some(isMobileTouchDevice)
+}
+
 export function shouldSubmitMessageKey(event, isTouchPrimary = false) {
   return event?.key === 'Enter'
     && !event.shiftKey
