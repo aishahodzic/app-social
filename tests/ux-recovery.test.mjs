@@ -83,11 +83,12 @@ test('all message composers use touch-aware Enter behavior', () => {
   assert.match(board, /<MessageInput inputRef=\{replyInputRef\} className="cn-reply-input"/)
 })
 
-test('Community explains Join at the composer and preserves the reader when history is prepended', () => {
+test('Community replaces the unjoined composer with Join and preserves earlier-message position', () => {
   const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
-  assert.match(board, /Continuing starts Join and shares your handle and profile photo\./)
-  assert.match(board, /Your draft will not be posted\./)
-  assert.match(board, /aria-describedby=\{!canInteract \? 'cn-community-join-disclosure' : undefined\}/)
+  assert.match(board, /\{canInteract \? <form className="cn-board-composer" onSubmit=\{submitPost\}>/)
+  assert.match(board, /cn-board-composer cn-board-join/)
+  assert.match(board, /Join Social to message/)
+  assert.doesNotMatch(board, /Continue to send message/)
   assert.match(board, /const previousHeight = scroller\?\.scrollHeight/)
   assert.match(board, /prependedScrollTop\(previousTop, previousHeight, scroller\.scrollHeight\)/)
 })
@@ -259,9 +260,9 @@ test('high-cardinality phone reactions wrap without clipping accessible controls
   assert.doesNotMatch(theme, /\.cn-reactions \{ flex-basis: 100%; \}/)
   assert.match(board, /visibleReactions\.map\(\(emoji\) =>/)
   assert.doesNotMatch(board, /visibleReactions\.slice/)
-  assert.match(board, /aria-label=\{reactionActionLabel\(reactions\[emoji\], emoji\)\}/)
+  assert.match(board, /canInteract \? reactionActionLabel\(reactions\[emoji\], emoji\) : 'Join Social to react'/)
   assert.doesNotMatch(board, /className="cn-reaction-anchor"/)
-  assert.match(board, /className="cn-reactions"[\s\S]*aria-label=\{emojiReactions \? 'Add reaction' : 'Like'\}[\s\S]*className="cn-reaction-picker"/)
+  assert.match(board, /className="cn-reactions"[\s\S]*aria-label=\{!canInteract \? 'Join Social to react'[\s\S]*className="cn-reaction-picker"/)
 })
 
 test('reaction picker width fits every 44 pixel choice without horizontal spill', () => {

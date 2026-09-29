@@ -21,16 +21,21 @@ test('message keyboard rules match Möbius Chat across physical and touch keyboa
   assert.equal(shouldSubmitMessageKey(undefined), false)
 })
 
-test('touch detection follows the Möbius shell when the embedded app frame disagrees', () => {
+test('touch detection follows the same live pointer query as Möbius Chat', () => {
+  let touchPrimary = false
   const frame = {
-    matchMedia: () => ({ matches: false }),
+    matchMedia: (query) => {
+      assert.equal(query, TOUCH_PRIMARY_QUERY)
+      return { matches: touchPrimary }
+    },
     parent: { matchMedia: () => ({ matches: true }) },
   }
+  assert.equal(isTouchPrimary(frame), false)
+  touchPrimary = true
   assert.equal(isTouchPrimary(frame), true)
-  assert.equal(isTouchPrimary({ matchMedia: () => ({ matches: false }) }), false)
 })
 
-test('touch detection recognizes phones when embedded media queries are unavailable', () => {
+test('touch detection does not guess from a device name or touch hardware', () => {
   const phone = {
     matchMedia: () => ({ matches: false }),
     navigator: { maxTouchPoints: 5, userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0)' },
@@ -39,8 +44,9 @@ test('touch detection recognizes phones when embedded media queries are unavaila
     matchMedia: () => ({ matches: false }),
     navigator: { maxTouchPoints: 10, userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
   }
-  assert.equal(isTouchPrimary(phone), true)
+  assert.equal(isTouchPrimary(phone), false)
   assert.equal(isTouchPrimary(touchLaptop), false)
+  assert.equal(isTouchPrimary({ navigator: phone.navigator }), false)
 })
 
 test('prepending older messages keeps the message being read at the same viewport position', () => {

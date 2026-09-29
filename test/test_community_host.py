@@ -42,6 +42,13 @@ def _signed(key: Ed25519PrivateKey, body: dict) -> dict:
   return {**body, "sig": base64.b64encode(key.sign(canonical(body))).decode()}
 
 
+def _search(client, key, host: str, q: str = ""):
+  return client.post("/api/common/directory/search", json=_signed(key, {
+    "v": 0, "type": "directory_read", "from": host,
+    "q": q, "sent_at": time.time(),
+  }))
+
+
 class _ActorCards:
   """Serve each member's live actor card (None: the member is unreachable)."""
 
@@ -55,6 +62,34 @@ class _ActorCards:
 
 
 class CommunityHostTests(unittest.TestCase):
+  def test_board_is_public_but_people_require_signed_membership(self):
+    with tempfile.TemporaryDirectory() as data_dir:
+      peer = _peer(Path(data_dir), "peer.example")
+      outsider = _peer(Path(data_dir), "outsider.example")
+      store = common_public.CommonPublicStore(data_dir)
+      store.register("peer.example", "peer", "")
+      with TestClient(community_host.create_app(data_dir)) as client:
+        self.assertEqual(client.get("/api/common/board").status_code, 200)
+        public_people = client.get("/api/common/directory")
+        self.assertEqual(public_people.status_code, 403)
+        self.assertEqual(public_people.headers["cache-control"], "no-store")
+        self.assertEqual(_search(client, outsider, "outsider.example").status_code, 403)
+        outsider_post = _signed(outsider, {
+          "v": 0, "type": "board_post", "id": str(uuid.uuid4()),
+          "from": "outsider.example", "text": "Not joined", "sent_at": time.time(),
+        })
+        self.assertEqual(client.post("/api/common/board", json=outsider_post).status_code, 403)
+        forged = _signed(peer, {
+          "v": 0, "type": "directory_read", "from": "peer.example",
+          "q": "", "sent_at": time.time(),
+        })
+        forged["q"] = "tampered"
+        self.assertEqual(client.post("/api/common/directory/search", json=forged).status_code, 403)
+        self.assertEqual(
+          _search(client, peer, "peer.example").json()["users"][0]["host"],
+          "peer.example",
+        )
+
   def test_health_version_and_public_prefix_share_one_app(self):
     revision = "a" * 40
     with tempfile.TemporaryDirectory() as data_dir, patch.dict(
@@ -76,6 +111,7 @@ class CommunityHostTests(unittest.TestCase):
   def test_signed_board_flow_serves_reactions_and_media(self):
     with tempfile.TemporaryDirectory() as data_dir:
       peer = _peer(Path(data_dir), "peer.example")
+      common_public.CommonPublicStore(data_dir).register("peer.example", "peer", "")
       post_id = str(uuid.uuid4())
       with TestClient(community_host.create_app(data_dir)) as client:
         created = client.post("/api/common/board", json=_signed(peer, {
@@ -120,6 +156,9 @@ class CommunityHostTests(unittest.TestCase):
       root = Path(data_dir)
       author = _peer(root, "author.example")
       liker = _peer(root, "liker.example")
+      store = common_public.CommonPublicStore(data_dir)
+      store.register("author.example", "author", "")
+      store.register("liker.example", "liker", "")
       post_id = str(uuid.uuid4())
       relay = AsyncMock()
       with (
@@ -166,6 +205,7 @@ class CommunityHostTests(unittest.TestCase):
   def test_board_images_are_cached_for_a_day_and_revalidate_with_not_modified(self):
     with tempfile.TemporaryDirectory() as data_dir:
       peer = _peer(Path(data_dir), "peer.example")
+      common_public.CommonPublicStore(data_dir).register("peer.example", "peer", "")
       post_id = str(uuid.uuid4())
       with TestClient(community_host.create_app(data_dir)) as client:
         client.post("/api/common/board", json=_signed(peer, {
@@ -366,7 +406,7 @@ class CommunityHostTests(unittest.TestCase):
       store.add_reply(post_id, str(uuid.uuid4()), "replier.example", "", "Hi", time.time())
       with TestClient(community_host.create_app(data_dir)) as client:
         self.assertEqual(client.get("/api/common/board").json()["posts"], [])
-        self.assertEqual(client.get("/api/common/directory").json()["users"], [])
+        self.assertEqual(store.search_directory("")["users"], [])
         self.assertEqual(client.get(f"/api/common/board/{post_id}/replies").json()["replies"], [])
 
         cards = _ActorCards({"author.example": "ada", "replier.example": "lin"})
@@ -380,7 +420,7 @@ class CommunityHostTests(unittest.TestCase):
 
         post = client.get("/api/common/board").json()["posts"][0]
         replies = client.get(f"/api/common/board/{post_id}/replies").json()["replies"]
-        people = client.get("/api/common/directory", params={"q": "ada"}).json()["users"]
+        people = store.search_directory("ada")["users"]
     self.assertEqual(post["handle"], "ada")
     self.assertEqual(post["reply_authors"][0]["handle"], "lin")
     self.assertEqual(replies[0]["handle"], "lin")
@@ -412,7 +452,7 @@ class CommunityHostTests(unittest.TestCase):
           "v": 0, "type": "register", "from": "member.example",
           "handle": "claimed", "bio": "", "sent_at": time.time(),
         }))
-        people = client.get("/api/common/directory").json()["users"]
+        people = _search(client, peer, "member.example").json()["users"]
     self.assertEqual(response.status_code, 200)
     self.assertEqual([person["handle"] for person in people], ["member"])
 
@@ -444,6 +484,10 @@ class CommunityHostTests(unittest.TestCase):
         # Re-registering with a new handle re-reads the card; once it has
         # the handle, the same member can post under it.
         cached_handle("member")
+        client.post("/api/common/directory", json=_signed(member, {
+          "v": 0, "type": "register", "from": "member.example",
+          "handle": "member", "bio": "", "sent_at": time.time(),
+        })).raise_for_status()
         posted = client.post("/api/common/board", json=post())
         board = client.get("/api/common/board").json()["posts"]
     self.assertEqual(refused.status_code, 409)

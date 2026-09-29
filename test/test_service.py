@@ -45,6 +45,68 @@ def signed(key, body):
 
 
 class SocialServiceTests(unittest.TestCase):
+  def seed_member(self, root):
+    identity = root / "apps" / "7" / "server" / "common" / "identity.json"
+    identity.parent.mkdir(parents=True, exist_ok=True)
+    identity.write_text(json.dumps({
+      "joined_at": 1, "directory_synced": {"handle": "owner", "avatar": ""},
+      "handle": "owner", "private_key_b64": base64.b64encode(b"p" * 32).decode(),
+    }))
+
+  def test_unjoined_owner_cannot_open_people_or_private_chat_routes(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      actor = {"scope": "owner", "delegated": False}
+      for path in (
+        "people", "peer/member.example", "conversations/member.example/messages",
+        "groups/deadbeef/messages",
+      ):
+        with self.subTest(path=path):
+          response = self.call(root, path, actor=actor)
+          self.assertEqual(response["status"], 403)
+          self.assertIn("Join Social", response["body"]["detail"])
+
+  def test_join_is_not_reported_complete_until_directory_accepts_it(self):
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    with patch.dict(os.environ, {
+      "APP_STORAGE_DIR": "/tmp/social-join-test", "APP_ID": "7", "APP_SLUG": "social",
+    }):
+      from service_runtime import Principal
+      import social_routes
+
+    identity = {"name": "Owner", "handle": "owner", "private_key_b64": "unused"}
+    principal = Principal("owner", None, None)
+    with (
+      patch.object(social_routes, "_require_owner_or_common_app"),
+      patch.object(social_routes, "_refresh_profile_cache", new=AsyncMock(
+        return_value={"identity": identity, "profile": {"name": "Owner"}},
+      )),
+      patch.object(social_routes, "_save_identity"),
+      patch.object(social_routes, "_register_with_community_host", new=AsyncMock(
+        return_value="unreachable",
+      )),
+    ):
+      pending = asyncio.run(social_routes.join_community(db=None, principal=principal))
+    self.assertEqual(pending["status"], "pending")
+    self.assertFalse(social_routes._membership_confirmed(identity))
+
+    async def accepted(record):
+      record["directory_synced"] = {"handle": "owner"}
+      return "registered"
+
+    with (
+      patch.object(social_routes, "_require_owner_or_common_app"),
+      patch.object(social_routes, "_refresh_profile_cache", new=AsyncMock(
+        return_value={"identity": identity, "profile": {"name": "Owner"}},
+      )),
+      patch.object(social_routes, "_save_identity"),
+      patch.object(social_routes, "_register_with_community_host", new=accepted),
+    ):
+      joined = asyncio.run(social_routes.join_community(db=None, principal=principal))
+    self.assertEqual(joined["status"], "joined")
+    self.assertTrue(social_routes._membership_confirmed(identity))
+
   def test_wire_json_size_matches_the_http_transport(self):
     envelope = {
       "type": "board_post", "text": "Four photos 📸",
@@ -392,6 +454,7 @@ asyncio.run(main())
   def test_read_markers_are_mutated_by_social_without_rewriting_metadata(self):
     with tempfile.TemporaryDirectory() as directory:
       root = Path(directory)
+      self.seed_member(root)
       storage = root / "apps" / "7"
       dm_meta = storage / "conversations" / "peer.example" / "meta.json"
       group_meta = storage / "groups" / "deadbeef" / "meta.json"
@@ -433,6 +496,7 @@ asyncio.run(main())
   def test_message_history_is_bounded_cursor_ordered_and_reconciles_file_writes(self):
     with tempfile.TemporaryDirectory() as directory:
       root = Path(directory)
+      self.seed_member(root)
       storage = root / "apps" / "7"
       messages = storage / "conversations" / "peer.example" / "msgs"
       messages.mkdir(parents=True)
@@ -510,6 +574,7 @@ mirror_message('dm', 'peer.example', json.loads(path.read_text()), path)
   def test_message_history_falls_back_to_json_when_its_index_is_unavailable(self):
     with tempfile.TemporaryDirectory() as directory:
       root = Path(directory)
+      self.seed_member(root)
       storage = root / "apps" / "7"
       messages = storage / "conversations" / "peer.example" / "msgs"
       messages.mkdir(parents=True)
@@ -537,6 +602,7 @@ mirror_message('dm', 'peer.example', json.loads(path.read_text()), path)
   def test_metadata_only_versions_do_not_rescan_unchanged_message_files(self):
     with tempfile.TemporaryDirectory() as directory:
       root = Path(directory)
+      self.seed_member(root)
       storage = root / "apps" / "7"
       conversation = storage / "conversations" / "peer.example"
       messages = conversation / "msgs"
@@ -733,7 +799,7 @@ mirror_message('dm', 'peer.example', json.loads(path.read_text()), path)
     def community(method, url, **kwargs):
       self.assertTrue(url.startswith("https://www.mobius.you/api/app-services/social/"))
       body = (
-        {"users": [{"host": "someone-else.example"}]} if url.endswith("/directory")
+        {"users": [{"host": "someone-else.example"}]} if url.endswith("/directory/search")
         else {"capabilities": {}, "next_cursor": None, "posts": []}
       )
       return httpx.Response(200, json=body, request=httpx.Request(method, url))
@@ -742,6 +808,11 @@ mirror_message('dm', 'peer.example', json.loads(path.read_text()), path)
     with (
       patch.dict(os.environ, environment),
       patch.object(social_routes, "_require_owner_or_common_app"),
+      patch.object(social_routes, "_load_identity", return_value={
+        "joined_at": 1, "directory_synced": {"handle": "owner"},
+        "private_key_b64": "unused",
+      }),
+      patch.object(social_routes, "_sign", return_value="signature"),
       patch.object(social_routes, "_cached_me_payload", new=AsyncMock(return_value=me)),
       patch.object(social_routes, "federation_request", new=AsyncMock(side_effect=community)),
     ):

@@ -184,11 +184,14 @@ export const CSS = `
 .cn-board-bottom { height: 1px; flex: 0 0 auto; }
 .cn-board-composer {
   position: sticky; bottom: 0; z-index: 30;
-  margin: 8px -16px 0; padding: 9px 16px max(10px, env(safe-area-inset-bottom));
+  margin: auto -16px 0; padding: 9px 16px max(10px, env(safe-area-inset-bottom));
   background: color-mix(in srgb, var(--bg) 92%, transparent);
   backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
   border-top: 1px solid color-mix(in srgb, var(--border) 76%, transparent);
 }
+.cn-board-join { text-align: center; }
+.cn-board-join .cn-btn { width: min(100%, 440px); min-height: 48px; }
+.cn-board-join .cn-composer-disclosure { margin: 7px auto 0; }
 .cn-social-input-row { display: flex; align-items: flex-end; gap: 8px; }
 .cn-social-pill {
   flex: 1; min-width: 0; min-height: 48px; padding: 4px;
@@ -1045,6 +1048,10 @@ export const CSS = `
 .cn-empty-title { font-size: 17px; font-weight: 700; color: var(--text); letter-spacing: -0.01em; }
 .cn-empty-text { margin: 0; font-size: 14px; line-height: 1.6; }
 /* /mobius-ui:Empty */
+.cn-join-access { padding-top: clamp(48px, 11vh, 120px); }
+.cn-join-access .cn-btn { min-width: 220px; min-height: 48px; margin-top: 14px; }
+.cn-join-privacy { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.cn-reply-join { margin: 10px 0 0; min-height: 44px; }
 
 /* mobius-ui:Toast v1 — keep in sync; library candidate. */
 .cn-toast {

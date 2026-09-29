@@ -1,8 +1,14 @@
 # Social community image
 
-This is the reproducible image for the shared public Social board and People
-directory at `www.mobius.you`. Private messages and owner identity keys remain
-on each person's own Möbius instance.
+This is the reproducible image for Social's shared public Community board and
+members-only People directory at `www.mobius.you`. Private messages and owner
+identity keys remain on each person's own Möbius instance.
+
+Deploy the signed directory-search support before updating personal Social
+installations, then close the old public GET directory after they have updated.
+The final image in this revision closes GET immediately: deploying it before
+updating older installations makes their People search fail. Merging this PR
+does not itself perform either deployment or an installation update.
 
 Build only from a committed revision and pass that exact revision into the
 image:

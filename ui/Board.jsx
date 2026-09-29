@@ -253,7 +253,7 @@ export default function Board({
   me, feed, feedState, onRefresh, onOpenPerson, onMessageUser, showToast, onOpenImage,
   hasEarlier, onLoadEarlier,
   composing, setComposing, canInteract, participationIntent, intentState,
-  participationBusy, onRetryIntent, onRequestParticipation,
+  participationBusy, onJoin, joinBusy, onRetryIntent, onRequestParticipation,
   onCompleteParticipation, onDiscardParticipation, onPostConfirmed, emojiReactions = false,
 }) {
   const [draft, setDraft] = useState('')
@@ -536,11 +536,7 @@ export default function Board({
     })
     const text = replyDraft.trim()
     const post = replyPost
-    if (!text || !post || replySending || handoffBusy) return
-    if (!canInteract) {
-      await continueParticipation('reply', { postId: post.id, text: replyDraft })
-      return
-    }
+    if (!canInteract || !text || !post || replySending || handoffBusy) return
 
     const localId = `local-${Date.now()}`
     const optimistic = {
@@ -857,24 +853,7 @@ export default function Board({
 
   async function submitPost(event) {
     event?.preventDefault()
-    if (canInteract) return publish()
-    // Not joined yet: compress now, then save the draft to resume after joining.
-    setPosting(true)
-    let payloads
-    try {
-      payloads = await collectImagePayloads(selectedImages, draft.trim())
-    } catch (error) {
-      setPosting(false)
-      showToast(error.message || 'An image couldn’t be prepared.', 'error')
-      return
-    }
-    setPosting(false)
-    await continueParticipation('post', {
-      text: draft,
-      attachment: payloads.attachment,
-      attachments: payloads.attachments,
-      thumbnails: payloads.thumbnails,
-    })
+    if (canInteract) await publish()
   }
 
   const chronologicalFeed = feed
@@ -964,9 +943,9 @@ export default function Board({
           ))
           const replyCount = countFor(post)
           const threadOpen = replyPost?.id === post.id
-          const togglePreview = () => setPreviewPost(
-            previewPost?.id === post.id ? null : { id: post.id, host: post.host },
-          )
+          const togglePreview = () => canInteract
+            ? setPreviewPost(previewPost?.id === post.id ? null : { id: post.id, host: post.host })
+            : onOpenPerson(post.host)
           return (
             <article className={`cn-post${threadOpen ? ' has-thread' : ''}${me?.host && post.host === me.host ? ' is-mine' : ''}`} key={post.id}
                      onClick={(event) => {
@@ -1035,9 +1014,9 @@ export default function Board({
                             className={`cn-reaction-chip${reactions[emoji].reacted ? ' is-reacted' : ''}`}
                             onClick={() => canInteract
                               ? toggleReaction(post, emoji)
-                              : continueParticipation('like', { postId: post.id, emoji })}
+                              : onJoin()}
                             disabled={handoffBusy || participationBusy}
-                            aria-label={reactionActionLabel(reactions[emoji], emoji)}>
+                            aria-label={canInteract ? reactionActionLabel(reactions[emoji], emoji) : 'Join Social to react'}>
                       <span className="cn-reaction-visual">
                         <FlatEmoji emoji={emoji} />
                         {reactions[emoji].count > 0 && <b>{reactions[emoji].count}</b>}
@@ -1046,14 +1025,12 @@ export default function Board({
                   ))}
                   {(emojiReactions || visibleReactions.length === 0) && (
                     <button id={`cn-react-${post.id}`} className="cn-react cn-add-reaction"
-                            onClick={() => emojiReactions
+                            onClick={() => !canInteract ? onJoin() : emojiReactions
                               ? setReactionPickerFor(reactionPickerFor === post.id ? null : post.id)
-                              : (canInteract
-                                ? toggleReaction(post, '❤️')
-                                : continueParticipation('like', { postId: post.id, emoji: '❤️' }))}
+                              : toggleReaction(post, '❤️')}
                             disabled={handoffBusy || participationBusy}
                             aria-expanded={emojiReactions ? reactionPickerFor === post.id : undefined}
-                            aria-label={emojiReactions ? 'Add reaction' : 'Like'}>
+                            aria-label={!canInteract ? 'Join Social to react' : emojiReactions ? 'Add reaction' : 'Like'}>
                       {emojiReactions ? <EmojiAdd aria-hidden="true" /> : <Heart aria-hidden="true" />}
                     </button>
                   )}
@@ -1073,7 +1050,7 @@ export default function Board({
                                   className={reactions[emoji].reacted ? 'is-reacted' : ''}
                                   onClick={() => {
                                     if (canInteract) toggleReaction(post, emoji)
-                                    else continueParticipation('like', { postId: post.id, emoji })
+                                    else onJoin()
                                     dismissReactionPicker(post.id)
                                   }}
                                   aria-pressed={reactions[emoji].reacted}
@@ -1117,21 +1094,22 @@ export default function Board({
                         </article>
                       ))}
                     </div>
-                    <form className={`cn-reply-composer${canInteract ? '' : ' is-gated'}`} onSubmit={sendReply}>
+                    {canInteract ? <form className="cn-reply-composer" onSubmit={sendReply}>
                       <div className="cn-social-pill">
                         <div className="cn-social-input-line">
                           <MessageInput inputRef={replyInputRef} className="cn-reply-input"
                                         value={replyDraft} onChange={setReplyDraft} maxLength={1000} maxHeight={132}
                                         placeholder="Post your reply"
                                         disabled={replySending || handoffBusy || participationBusy} />
-                          <button className={canInteract ? 'cn-reply-send' : 'cn-btn cn-btn-primary cn-reply-account'}
+                          <button className="cn-reply-send"
                                   type="submit" disabled={replySending || handoffBusy || participationBusy || !replyDraft.trim()}
-                                  aria-label={canInteract ? 'Send reply' : undefined}>
-                            {canInteract ? <ArrowUp aria-hidden="true" /> : participationActionLabel(participationStep(me), 'reply')}
+                                  aria-label="Send reply">
+                            <ArrowUp aria-hidden="true" />
                           </button>
                         </div>
                       </div>
-                    </form>
+                    </form> : <button className="cn-btn cn-btn-primary cn-reply-join" type="button"
+                                      onClick={onJoin} disabled={joinBusy}>Join Social to reply</button>}
                   </section>
                 )}
                 </div>
@@ -1173,7 +1151,7 @@ export default function Board({
         )}
       </div>
       <div ref={bottomMarkerRef} className="cn-board-bottom" aria-hidden="true" />
-      <form className="cn-board-composer" onSubmit={submitPost}>
+      {canInteract ? <form className="cn-board-composer" onSubmit={submitPost}>
         <div className="cn-social-input-row">
           <input ref={fileRef} className="cn-file-input" type="file" accept="image/*" multiple
                  onChange={chooseImage} tabIndex={-1} aria-hidden="true" />
@@ -1192,19 +1170,17 @@ export default function Board({
                             disabled={posting || handoffBusy || participationBusy} />
               <button className="cn-board-send" type="submit"
                       disabled={posting || handoffBusy || participationBusy || (!draft.trim() && !selectedImages.length)}
-                      aria-describedby={!canInteract ? 'cn-community-join-disclosure' : undefined}
-                      aria-label={canInteract ? 'Send message' : 'Continue to send message'}>
+                      aria-label="Send message">
                 <ArrowUp aria-hidden="true" />
               </button>
             </div>
           </div>
         </div>
-        {!canInteract && (
-          <p id="cn-community-join-disclosure" className="cn-composer-disclosure">
-            Continuing starts Join and shares your handle and profile photo. Your draft will not be posted.
-          </p>
-        )}
-      </form>
+      </form> : <div className="cn-board-composer cn-board-join">
+        <button className="cn-btn cn-btn-primary" type="button" onClick={onJoin}
+                disabled={joinBusy}>Join Social to message</button>
+        <p className="cn-composer-disclosure">Community is open to read. Join to message and open Chats and People.</p>
+      </div>}
 
       {deleteTarget && (
         <div className="cn-scrim" role="dialog" aria-modal="true" aria-label="Delete message"

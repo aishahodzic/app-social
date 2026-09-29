@@ -14,8 +14,8 @@ Ed25519-signed envelopes and no third-party storage:
    establishes consent. Each side stores only its own copy (in the Common
    mini-app's per-app storage), so a conversation lives exclusively on the two
    participants' servers.
-3. **Community host role** — any instance can host the shared, public parts:
-   an opt-in user directory (search) and a message board. Peers register and
+3. **Community host role** — the shared host serves a members-only directory
+   and a public message board. Peers register and
    post with the same signed-envelope scheme. Which host to use is the
    owner's choice (default: their own instance).
 
@@ -23,7 +23,7 @@ Public peer surface (no owner auth; envelope signatures are the authority):
   GET  /api/app-services/social/actor        federation keys; joined profile card
   GET  /api/app-services/social/avatar       instance profile avatar
   POST /api/app-services/social/inbox        deliver a signed DM
-  GET|POST /api/app-services/social/directory  public directory
+  GET|POST /api/app-services/social/directory  join and directory access control
   GET|POST /api/app-services/social/board      public board
   GET /api/app-services/social/board/{media|thumbnail}/{post_id}[/{index}][.{type}]
       hosted board image; links ending in the type are CDN-cacheable
@@ -40,7 +40,7 @@ Owner surface (owner JWT or the Social app's scoped token):
       local/cached community board image (mime: the type the post records)
   POST /api/services/social/reply        sign + submit a board reply to the community host
   GET  /api/services/social/feed         community host's board (local read when self)
-  GET  /api/services/social/people       community host directory search
+  GET  /api/services/social/people       member-only directory search
   GET  /api/services/social/peer/{host}  a peer's actor card (profile view)
   POST /api/services/social/peer-avatars  a bounded visible-avatar batch
 
@@ -1011,6 +1011,8 @@ def get_avatar():
 @router.post("/inbox")
 async def receive_message(request: Request, db=Depends(get_db)):
   """Accept one signed direct message from a peer instance."""
+  if not _joined_for_federation():
+    raise HTTPException(status_code=403, detail="Join Social before receiving messages.")
   envelope = await _read_envelope(request)
   if envelope.get("v") != 0 or envelope.get("type") != "message":
     raise HTTPException(status_code=400, detail="Unsupported envelope type.")
@@ -1117,6 +1119,24 @@ def _require_owner_or_common_app(db, principal: Principal):
     raise HTTPException(status_code=401, detail="Authentication required.")
   if principal.app_id is not None and principal.app_slug != APP_SLUG:
     raise HTTPException(status_code=403, detail="Not available to other apps.")
+  return app
+
+
+def _membership_confirmed(identity: dict) -> bool:
+  return bool(identity.get("joined_at") and identity.get("directory_synced"))
+
+
+def _joined_for_federation() -> bool:
+  # An anonymous inbound probe must not create a new identity on an untouched app.
+  return _identity_path().is_file() and _membership_confirmed(_load_identity())
+
+
+def _require_member(db, principal: Principal):
+  """Owner/app access is not Social membership; both are needed for private areas."""
+  app = _require_owner_or_common_app(db, principal)
+  identity = _load_identity()
+  if not _membership_confirmed(identity):
+    raise HTTPException(status_code=403, detail="Join Social to access this area.")
   return app
 
 
@@ -1229,7 +1249,7 @@ async def _me_response(
     "handle": identity.get("handle") or "",
     "bio": identity.get("bio") or "",
     "connected": connected,
-    "joined": bool(identity.get("joined_at")),
+    "joined": _membership_confirmed(identity),
     "account_error": account_error,
     "identity_app_id": await identity_app_id(),
   }
@@ -1291,7 +1311,7 @@ async def join_community(
   _save_identity(identity)
   status = await _register_with_community_host(identity)
   return {
-    "status": "joined",
+    "status": "joined" if status == "registered" else "pending",
     "directory": status,
     "name": identity.get("name") or "",
     "handle": identity.get("handle") or "",
@@ -1381,10 +1401,10 @@ async def accept_message_request(
   principal: Principal = Depends(get_principal),
 ):
   require_nondelegated_owner_control(principal)
-  app = _require_owner_or_common_app(db, principal)
+  app = _require_member(db, principal)
   # Acceptance may be the first authenticated federation action on a legacy
   # plaintext request. Create keys now so the accepted peer can verify and
-  # encrypt the owner's reply without requiring a public-directory join.
+  # encrypt the owner's reply after the required Social join.
   _load_identity()
   state = await _set_dm_request_state(app, _request_peer(peer_host), "accepted")
   return {"status": state}
@@ -1397,7 +1417,7 @@ async def decline_message_request(
   principal: Principal = Depends(get_principal),
 ):
   require_nondelegated_owner_control(principal)
-  app = _require_owner_or_common_app(db, principal)
+  app = _require_member(db, principal)
   state = await _set_dm_request_state(app, _request_peer(peer_host), "declined")
   return {"status": state}
 
@@ -1409,7 +1429,7 @@ async def block_message_request(
   principal: Principal = Depends(get_principal),
 ):
   require_nondelegated_owner_control(principal)
-  app = _require_owner_or_common_app(db, principal)
+  app = _require_member(db, principal)
   state = await _set_dm_request_state(app, _request_peer(peer_host), "blocked")
   return {"status": state}
 
@@ -1421,7 +1441,7 @@ async def mark_direct_conversation_read(
   principal: Principal = Depends(get_principal),
 ):
   require_nondelegated_owner_control(principal)
-  app = _require_owner_or_common_app(db, principal)
+  app = _require_member(db, principal)
   changed = await _mark_dm_read(app, _request_peer(peer_host))
   return {"status": "read", "changed": changed}
 
@@ -1436,7 +1456,7 @@ async def direct_message_history(
 ):
   """Read one bounded newest-first slice, returned in display order."""
   require_nondelegated_owner_control(principal)
-  app = _require_owner_or_common_app(db, principal)
+  app = _require_member(db, principal)
   peer = _request_peer(peer_host)
   messages_dir = _conversation_dir(app, peer) / "msgs"
   try:
@@ -1455,7 +1475,7 @@ async def send_message(
 ):
   """Persist one stable DM identity, then make a bounded delivery attempt."""
   require_nondelegated_owner_control(principal)
-  app = _require_owner_or_common_app(db, principal)
+  app = _require_member(db, principal)
   to_host = message.to.strip().lower()
   text = message.text.strip()
   if not _valid_host(to_host):
@@ -1502,7 +1522,7 @@ async def retry_direct_message(
 ):
   """Retry a persisted outgoing message without creating a new identity."""
   require_nondelegated_owner_control(principal)
-  app = _require_owner_or_common_app(db, principal)
+  app = _require_member(db, principal)
   peer = _request_peer(peer_host)
   if not _valid_id(message_id):
     raise HTTPException(status_code=400, detail="Message id is invalid.")
@@ -1522,7 +1542,7 @@ async def publish_post(
 ):
   """Sign a board post and submit it to the community host."""
   require_nondelegated_owner_control(principal)
-  _require_owner_or_common_app(db, principal)
+  _require_member(db, principal)
   text = post.text.strip()
   attachment = _validate_attachment(post.attachment)
   attachments = _validate_attachments(post.attachments)
@@ -1771,7 +1791,7 @@ async def react_to_post(
 
 async def _react_to_post(post_id_value, emoji, db, principal):
   require_nondelegated_owner_control(principal)
-  _require_owner_or_common_app(db, principal)
+  _require_member(db, principal)
   post_id = str(post_id_value).strip()
   if not re.fullmatch(r"[a-f0-9-]{8,64}", post_id):
     raise HTTPException(status_code=400, detail="Post id is invalid.")
@@ -1812,7 +1832,7 @@ async def reply_to_post(
 ):
   """Reply to a community-board post, signed as this instance."""
   require_nondelegated_owner_control(principal)
-  _require_owner_or_common_app(db, principal)
+  _require_member(db, principal)
   post_id = body.post_id.strip()
   if not re.fullmatch(r"[a-f0-9-]{8,64}", post_id):
     raise HTTPException(status_code=400, detail="Post id is invalid.")
@@ -1859,7 +1879,7 @@ async def delete_own_post(
 ):
   """Delete one of the owner's own board posts from the community host."""
   require_nondelegated_owner_control(principal)
-  _require_owner_or_common_app(db, principal)
+  _require_member(db, principal)
   post_id = body.post_id.strip()
   if not re.fullmatch(r"[a-f0-9-]{8,64}", post_id):
     raise HTTPException(status_code=400, detail="Post id is invalid.")
@@ -1909,15 +1929,36 @@ async def _people_payload(
   db: object = None,
   principal: Principal = None,
 ) -> dict:
-  _require_owner_or_common_app(db, principal)
+  _require_member(db, principal)
+  return await _search_community_members(q)
+
+
+async def _search_community_members(q: str) -> dict:
+  """One signed directory read for Social and shared-object invite lookup."""
   host = COMMUNITY_HOST
+  identity = _load_identity()
+  envelope = {
+    "v": 0, "type": "directory_read", "from": _own_host(),
+    "q": q, "sent_at": time.time(),
+  }
+  envelope["sig"] = _sign(envelope, identity["private_key_b64"])
   try:
     response = await federation_request(
-      "GET", _peer_service_url(host, "directory"), params={"q": q},
+      "POST", _peer_service_url(host, "directory/search"), json=envelope,
       timeout_seconds=OUTBOUND_TIMEOUT_S,
     )
     response.raise_for_status()
     return {"host": host, **response.json()}
+  except httpx.HTTPStatusError as exc:
+    if exc.response.status_code == 403:
+      raise HTTPException(
+        status_code=403, detail="Join Social again to access People.",
+      ) from exc
+    raise HTTPException(
+      status_code=502, detail="Community host could not be reached."
+    ) from exc
+  except HTTPException:
+    raise
   except Exception as exc:
     raise HTTPException(
       status_code=502, detail="Community host could not be reached."
@@ -1958,8 +1999,8 @@ async def bootstrap_social(
         )
         else "missing"
       )
-    except HTTPException:
-      registration = "unavailable"
+    except HTTPException as exc:
+      registration = "missing" if exc.status_code == 403 else "unavailable"
   return {"me": {**me, "registration": registration}, "feed": feed}
 
 
@@ -1970,7 +2011,7 @@ async def get_peer(
   principal: Principal = Depends(get_principal),
 ):
   """A peer's public actor card, for profile views in the app UI."""
-  _require_owner_or_common_app(db, principal)
+  _require_member(db, principal)
   actor = await _fetch_actor(host.strip().lower())
   return actor
 
