@@ -20,7 +20,7 @@ import {
 } from '../avatarCache.js'
 import { EMOJI_ART } from '../emoji_art.js'
 import { boardPostFitsWireLimit } from '../board_payload.js'
-import { shouldSubmitMessageKey } from './interactionRules.js'
+import MessageInput from './MessageInput.jsx'
 
 const MAX_POST_IMAGES = 4
 const GALLERY_BUDGET_BYTES = 960 * 1024
@@ -292,20 +292,6 @@ export default function Board({
     () => restoreDeleteFocus.current,
   )
   replySendingRef.current = replySending
-
-  useEffect(() => {
-    const input = composerInputRef.current
-    if (!input) return
-    input.style.height = 'auto'
-    input.style.height = `${Math.min(input.scrollHeight, 132)}px`
-  }, [draft])
-
-  useEffect(() => {
-    const input = replyInputRef.current
-    if (!input) return
-    input.style.height = 'auto'
-    input.style.height = `${Math.min(input.scrollHeight, 132)}px`
-  }, [replyDraft])
 
   useEffect(() => {
     const marker = bottomMarkerRef.current
@@ -882,12 +868,6 @@ export default function Board({
     })
   }
 
-  function sendOnEnter(event) {
-    if (!shouldSubmitMessageKey(event)) return
-    event.preventDefault()
-    event.currentTarget.form.requestSubmit()
-  }
-
   const chronologicalFeed = feed
     .filter((post) => !hiddenIds.has(post.id))
     .slice()
@@ -1131,10 +1111,10 @@ export default function Board({
                     <form className={`cn-reply-composer${canInteract ? '' : ' is-gated'}`} onSubmit={sendReply}>
                       <div className="cn-social-pill">
                         <div className="cn-social-input-line">
-                          <textarea ref={replyInputRef} className="cn-reply-input" rows={1} value={replyDraft}
-                                    onChange={(event) => setReplyDraft(event.target.value)} onKeyDown={sendOnEnter}
-                                    placeholder="Post your reply" aria-label="Post your reply" autoComplete="off"
-                                    maxLength={1000} disabled={replySending || handoffBusy || participationBusy} />
+                          <MessageInput inputRef={replyInputRef} className="cn-reply-input"
+                                        value={replyDraft} onChange={setReplyDraft} maxLength={1000} maxHeight={132}
+                                        placeholder="Post your reply"
+                                        disabled={replySending || handoffBusy || participationBusy} />
                           <button className={canInteract ? 'cn-reply-send' : 'cn-btn cn-btn-primary cn-reply-account'}
                                   type="submit" disabled={replySending || handoffBusy || participationBusy || !replyDraft.trim()}
                                   aria-label={canInteract ? 'Send reply' : undefined}>
@@ -1197,10 +1177,10 @@ export default function Board({
           <div className={`cn-social-pill${selectedImages.length ? ' is-with-attachments' : ''}`}>
             <SelectedImagesStrip selected={selectedImages} onRemove={removeImage} />
             <div className="cn-social-input-line">
-              <textarea ref={composerInputRef} rows={1} value={draft} maxLength={4000}
-                        onChange={(event) => setDraft(event.target.value)} onKeyDown={sendOnEnter}
-                        disabled={posting || handoffBusy || participationBusy}
-                        placeholder="Message everyone…" aria-label="Message everyone" autoComplete="off" />
+              <MessageInput inputRef={composerInputRef} value={draft} onChange={setDraft}
+                            maxLength={4000} maxHeight={132} placeholder="Message everyone…"
+                            label="Message everyone"
+                            disabled={posting || handoffBusy || participationBusy} />
               <button className="cn-board-send" type="submit"
                       disabled={posting || handoffBusy || participationBusy || (!draft.trim() && !selectedImages.length)}
                       aria-label={canInteract ? 'Send message' : 'Continue to send message'}>

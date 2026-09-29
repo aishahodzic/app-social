@@ -73,12 +73,11 @@ test('message text stays selectable and reply uses an explicit touch target', ()
 test('all message composers send on Enter and keep Shift+Enter for a newline', () => {
   const board = readFileSync(new URL('../ui/Board.jsx', import.meta.url), 'utf8')
   const input = readFileSync(new URL('../ui/MessageInput.jsx', import.meta.url), 'utf8')
-  for (const source of [board, input]) {
-    assert.match(source, /shouldSubmitMessageKey\(event\)/)
-    assert.match(source, /event\.currentTarget\.form\.requestSubmit\(\)/)
-    assert.doesNotMatch(source, /pointer: coarse/)
-  }
-  assert.match(board, /className="cn-reply-input"[\s\S]*onKeyDown=\{sendOnEnter\}/)
+  assert.match(input, /shouldSubmitMessageKey\(event\)/)
+  assert.match(input, /event\.currentTarget\.form\.requestSubmit\(\)/)
+  assert.doesNotMatch(input, /pointer: coarse/)
+  assert.equal((board.match(/<MessageInput /g) || []).length, 2)
+  assert.match(board, /<MessageInput inputRef=\{replyInputRef\} className="cn-reply-input"/)
 })
 
 test('Community and replies use the Möbius chat composer primitive', () => {

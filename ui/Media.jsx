@@ -5,6 +5,7 @@ import { boardThumbnail } from '../boardMediaCache.js'
 import {
   clampLightboxScale, pinchLightboxScale, wheelLightboxScale,
 } from './interactionRules.js'
+import { useModalFocus } from './modalFocus.js'
 
 const MAX_BYTES = 1024 * 1024
 const MAX_SIDE = 1600
@@ -321,16 +322,12 @@ export function SelectedImagesStrip({ selected, onRemove }) {
 }
 
 export function Lightbox({ image, onClose }) {
-  const rootRef = useRef(null)
-  const closeRef = useRef(null)
-  const closeAction = useRef(onClose)
-  const returnFocus = useRef(null)
+  const rootRef = useModalFocus(Boolean(image), onClose)
   const pointers = useRef(new Map())
   const pinch = useRef(null)
   const scaleRef = useRef(1)
   const [scale, setScale] = useState(1)
   const [offset, setOffset] = useState({ x: 0, y: 0 })
-  closeAction.current = onClose
 
   function applyZoom(next) {
     const current = scaleRef.current
@@ -389,36 +386,22 @@ export function Lightbox({ image, onClose }) {
     setOffset({ x: 0, y: 0 })
     pointers.current.clear()
     pinch.current = null
-    returnFocus.current = document.activeElement
     const onKeyDown = (event) => {
-      if (event.key === 'Escape') closeAction.current()
-      if (event.key === '+' || event.key === '=') {
+      const delta = event.key === '+' || event.key === '=' ? 0.25
+        : event.key === '-' ? -0.25
+          : null
+      if (delta !== null) {
         event.preventDefault()
-        applyZoom(scaleRef.current + 0.25)
-      }
-      if (event.key === '-') {
-        event.preventDefault()
-        applyZoom(scaleRef.current - 0.25)
-      }
-      if (event.key === '0') {
+        applyZoom(scaleRef.current + delta)
+      } else if (event.key === '0') {
         event.preventDefault()
         applyZoom(1)
       }
-      if (event.key === 'Tab') {
-        event.preventDefault()
-        const controls = [...(rootRef.current?.querySelectorAll('button:not(:disabled)') || [])]
-        if (!controls.length) return
-        const current = controls.indexOf(document.activeElement)
-        const direction = event.shiftKey ? -1 : 1
-        controls[(current + direction + controls.length) % controls.length]?.focus()
-      }
     }
     document.addEventListener('keydown', onKeyDown)
-    closeRef.current?.focus()
     return () => {
       document.removeEventListener('keydown', onKeyDown)
       image.cleanup?.()
-      returnFocus.current?.focus?.()
     }
   }, [image?.url])
 
@@ -426,7 +409,7 @@ export function Lightbox({ image, onClose }) {
   return (
     <div ref={rootRef} className="cn-lightbox" role="dialog" aria-modal="true" aria-label="Image preview"
          onClick={onClose}>
-      <button ref={closeRef} className="cn-lightbox-close" type="button"
+      <button className="cn-lightbox-close" type="button"
               onClick={(event) => { event.stopPropagation(); onClose() }} aria-label="Close image preview">
         <X aria-hidden="true" />
       </button>
