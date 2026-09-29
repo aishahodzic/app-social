@@ -1270,23 +1270,27 @@ async def send_board_activity(
 
 async def verify_named_member(
   store: CommonPublicStore, verifier: ActorVerifier, envelope: dict, *,
-  require_registration: bool = True,
+  require_registration: bool = True, expected_handle: str | None = None,
 ) -> dict:
   """Verify a public write whose author must be named by a handle.
 
   Everything on the board and in the directory is shown by handle, so a member
   without one cannot join or take part. A cached card can predate a handle the
-  member has just chosen, so an unnamed card is re-read once before refusing.
+  member has just chosen, so an unnamed or outdated card is re-read once.
   The verified handle is the member's current name, so the directory takes it
   here; every row by them follows without waiting for a sweep.
   """
   actor = await verifier.verify_envelope(envelope)
-  if not actor.get("handle"):
+  if not actor.get("handle") or (
+    expected_handle is not None and actor.get("handle") != expected_handle
+  ):
     try:
       await verifier.fetch_actor(envelope["from"], force=True)
       actor = await verifier.verify_envelope(envelope)
     except HTTPException:
-      raise HTTPException(status_code=409, detail=NEEDS_USERNAME) from None
+      if not actor.get("handle"):
+        raise HTTPException(status_code=409, detail=NEEDS_USERNAME) from None
+      raise
     if not actor.get("handle"):
       raise HTTPException(status_code=409, detail=NEEDS_USERNAME)
   if require_registration and not store.is_member(envelope["from"]):
@@ -1334,8 +1338,12 @@ def create_public_router(
     envelope = await read_envelope(request)
     if envelope.get("v") != 0 or envelope.get("type") != "register":
       raise HTTPException(status_code=400, detail="Unsupported envelope type.")
+    claimed_handle = envelope.get("handle")
+    if not isinstance(claimed_handle, str) or len(claimed_handle) > MAX_NAME_CHARS:
+      raise HTTPException(status_code=400, detail="Directory profile is invalid.")
     actor = await verify_named_member(
       store, verifier, envelope, require_registration=False,
+      expected_handle=claimed_handle,
     )
     handle = actor["handle"]
     bio = envelope.get("bio") or ""
@@ -1347,7 +1355,7 @@ def create_public_router(
     registered = store.register(envelope["from"], handle, bio)
     if on_register is not None:
       await on_register(envelope["from"])
-    return registered
+    return {**registered, "handle": handle}
 
   @router.get("/directory/avatars/{name}")
   def get_member_avatar(name: str, request: Request):

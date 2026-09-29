@@ -160,6 +160,29 @@ class PeerAvatarHardeningTests(unittest.IsolatedAsyncioTestCase):
     self.assertNotIn("avatar_source_url", identity)
     save.assert_called_once_with(identity)
 
+  async def test_avatar_cache_failure_does_not_block_profile_refresh(self):
+    identity = {"name": "Old", "handle": "owner", "avatar_source_url": "old-url"}
+    with patch.object(
+      social_routes, "_identity_lock", new=unlocked_identity,
+    ), patch.object(
+      social_routes, "_load_identity", return_value=identity,
+    ), patch.object(
+      social_routes, "owner_profile", AsyncMock(return_value={
+        "display_name": "New", "handle": "owner", "avatar_url": "new-url",
+      }),
+    ), patch.object(
+      social_routes, "_download_avatar", AsyncMock(return_value=png()),
+    ), patch.object(
+      social_routes, "_avatar_path", return_value=self.root / "avatar.png",
+    ), patch.object(
+      social_routes, "atomic_write", side_effect=OSError("photo cache unavailable"),
+    ), patch.object(social_routes, "_save_identity") as save:
+      state = await social_routes._refresh_profile_cache(None, None)
+    self.assertEqual(state["identity"]["name"], "New")
+    self.assertEqual(state["identity"]["avatar_source_url"], "old-url")
+    self.assertFalse(state["avatar_updated"])
+    save.assert_called_once_with(identity)
+
   async def test_untrusted_avatar_is_reencoded_at_the_avatar_size(self):
     with self.route_context(), patch.object(
       social_routes, "_fetch_actor", AsyncMock(return_value={"avatar": True}),

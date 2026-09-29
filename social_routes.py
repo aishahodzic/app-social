@@ -157,6 +157,10 @@ def _identity_path() -> Path:
   return Path(get_settings().data_dir) / "common" / "identity.json"
 
 
+def _identity_lock_path() -> Path:
+  return _identity_path().with_name(".identity.lock")
+
+
 def _avatar_path() -> Path:
   return _common_dir() / "avatar.png"
 
@@ -472,9 +476,25 @@ def _encryption_public_key(private_key_b64: str) -> str:
   ).decode()
 
 
-def _load_identity() -> dict:
+def _load_identity(*, locked: bool = False) -> dict:
   """Load (or lazily create) this instance's federation identity."""
   path = _identity_path()
+  if path.is_file():
+    identity = json.loads(path.read_text())
+    if identity.get("enc_private_key_b64"):
+      return identity
+  if not locked:
+    # Only first-use creation/migration writes here. Its lock-holder does not
+    # await before saving the keys, so a synchronous caller cannot deadlock an
+    # async registration waiting on the same event loop.
+    lock_path = _identity_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+      fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+      try:
+        return _load_identity(locked=True)
+      finally:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
   if path.is_file():
     identity = json.loads(path.read_text())
     if not identity.get("enc_private_key_b64"):
@@ -1203,7 +1223,7 @@ async def _refresh_profile_cache(db, principal: Principal) -> dict:
   briefly unreachable; the live profile remains the source of truth.
   """
   async with _identity_lock():
-    cached_avatar_url = _load_identity().get("avatar_source_url")
+    cached_avatar_url = _load_identity(locked=True).get("avatar_source_url")
   profile = None
   account_error = None
   avatar_updated = False
@@ -1221,7 +1241,7 @@ async def _refresh_profile_cache(db, principal: Principal) -> dict:
   async with _identity_lock():
     # Profile calls may return while registration is in flight. Apply only
     # these profile fields to the latest saved identity, never a stale snapshot.
-    identity = _load_identity()
+    identity = _load_identity(locked=True)
     changed = False
     if profile:
       name = str(profile.get("display_name") or profile.get("handle") or "")[:MAX_NAME_CHARS]
@@ -1230,16 +1250,20 @@ async def _refresh_profile_cache(db, principal: Principal) -> dict:
         identity["name"] = name
         identity["handle"] = handle
         changed = True
-      if avatar is not None and avatar_url != identity.get("avatar_source_url"):
-        atomic_write(_avatar_path(), avatar)
-        identity["avatar_source_url"] = avatar_url
-        avatar_updated = changed = True
-      elif "avatar_url" in profile and not avatar_url:
-        avatar_path = _avatar_path()
-        if avatar_path.is_file() or identity.get("avatar_source_url"):
-          avatar_path.unlink(missing_ok=True)
-          identity.pop("avatar_source_url", None)
+      try:
+        if avatar is not None and avatar_url != identity.get("avatar_source_url"):
+          atomic_write(_avatar_path(), avatar)
+          identity["avatar_source_url"] = avatar_url
           avatar_updated = changed = True
+        elif "avatar_url" in profile and not avatar_url:
+          avatar_path = _avatar_path()
+          if avatar_path.is_file() or identity.get("avatar_source_url"):
+            avatar_path.unlink(missing_ok=True)
+            identity.pop("avatar_source_url", None)
+            avatar_updated = changed = True
+      except OSError:
+        # A failed local photo cache must not prevent joining or profile edits.
+        pass
       if changed:
         _save_identity(identity)
   if identity.get("joined_at") and identity.get("directory_synced") != _directory_listing(identity):
@@ -1321,7 +1345,7 @@ async def join_community(
   _require_owner_or_common_app(db, principal)
   state = await _refresh_profile_cache(db, principal)
   async with _identity_lock():
-    identity = _load_identity()
+    identity = _load_identity(locked=True)
     if not state["profile"] and not identity.get("name"):
       raise HTTPException(
         status_code=409,
@@ -1350,12 +1374,30 @@ def _directory_listing(identity: dict) -> dict:
   }
 
 
+async def _legacy_registration_matches(handle: str) -> bool:
+  """Check the old host's public directory before trusting its bare 200 reply.
+
+  Remove this only after older community hosts no longer need to interoperate.
+  New hosts return the verified handle directly and never use this read.
+  """
+  response = await federation_request(
+    "GET", _peer_service_url(COMMUNITY_HOST, "directory"),
+    params={"q": _own_host()}, timeout_seconds=3.0,
+  )
+  response.raise_for_status()
+  users = response.json().get("users")
+  return isinstance(users, list) and any(
+    isinstance(person, dict) and person.get("host") == _own_host()
+    and person.get("handle") == handle for person in users
+  )
+
+
 @asynccontextmanager
 async def _identity_lock():
   # Each service request may run in another process. Nonblocking flock also
   # lets a second request on this event loop wait without freezing the first.
   # Keep this inode: unlinking it could split the lock across processes.
-  path = _identity_path().with_name(".identity.lock")
+  path = _identity_lock_path()
   path.parent.mkdir(parents=True, exist_ok=True)
   with path.open("a+b") as handle:
     while True:
@@ -1374,7 +1416,7 @@ async def _register_with_community_host(identity: dict) -> str:
   """Announce this instance to its community host. Returns a status string."""
   async with _identity_lock():
     # A waiting request may hold a snapshot from before another Join finished.
-    saved = dict(_load_identity())
+    saved = dict(_load_identity(locked=True))
     identity.clear()
     identity.update(saved)
     listing = _directory_listing(identity)
@@ -1396,13 +1438,26 @@ async def _register_with_community_host(identity: dict) -> str:
         max_response_bytes=MAX_ENVELOPE_BYTES,
       )
       response.raise_for_status()
-      status = "registered"
+      acknowledgement = response.json()
+      if not isinstance(acknowledgement, dict) or acknowledgement.get("status") != "registered":
+        status = "verification_failed"
+      elif acknowledgement.get("handle") == listing["handle"]:
+        status = "registered"
+      elif "handle" not in acknowledgement:
+        # The still-running old host returns only {status: registered}.
+        # Check its actual directory row before considering this Join complete.
+        status = (
+          "registered" if await _legacy_registration_matches(listing["handle"])
+          else "verification_failed"
+        )
+      else:
+        status = "verification_failed"
     except httpx.HTTPStatusError as exc:
       status = "verification_failed" if exc.response.status_code == 403 else "rejected"
     except Exception:
       pass
     finally:
-      latest = dict(_load_identity())
+      latest = dict(_load_identity(locked=True))
       if status == "registered":
         latest["directory_synced"] = listing
       latest.pop("registration_public_until", None)
@@ -1443,7 +1498,7 @@ async def update_me(
   require_nondelegated_owner_control(principal)
   _require_owner_or_common_app(db, principal)
   async with _identity_lock():
-    identity = _load_identity()
+    identity = _load_identity(locked=True)
     if update.bio is not None:
       identity["bio"] = update.bio.strip()[:MAX_BIO_CHARS]
       _save_identity(identity)

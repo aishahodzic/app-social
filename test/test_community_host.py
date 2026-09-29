@@ -240,7 +240,7 @@ class CommunityHostTests(unittest.TestCase):
         deadline = time.monotonic() + 5
         while not refreshed.await_count and time.monotonic() < deadline:
           time.sleep(0.02)
-    self.assertEqual(response.json(), {"status": "registered"})
+    self.assertEqual(response.json(), {"status": "registered", "handle": "member"})
     self.assertEqual(refreshed.await_args.args[2], "member.example")
 
   def test_member_avatars_are_content_addressed_and_follow_changes(self):
@@ -444,7 +444,15 @@ class CommunityHostTests(unittest.TestCase):
   def test_registration_uses_verified_actor_handle_not_envelope_claim(self):
     with tempfile.TemporaryDirectory() as data_dir:
       peer = _peer(Path(data_dir), "member.example")
+      cached = common_public.ActorVerifier.fetch_actor
+
+      async def unchanged_actor(verifier, host, *, force=False):
+        # Even after a forced refresh, an older live actor may still say
+        # "member"; the host must not trust the signed "claimed" field.
+        return await cached(verifier, host, force=False)
+
       with (
+        patch.object(common_public.ActorVerifier, "fetch_actor", new=unchanged_actor),
         patch.object(community_host, "refresh_member_profile", new=AsyncMock()),
         TestClient(community_host.create_app(data_dir)) as client,
       ):
@@ -454,7 +462,32 @@ class CommunityHostTests(unittest.TestCase):
         }))
         people = _search(client, peer, "member.example").json()["users"]
     self.assertEqual(response.status_code, 200)
+    self.assertEqual(response.json()["handle"], "member")
     self.assertEqual([person["handle"] for person in people], ["member"])
+
+  def test_registration_refreshes_a_cached_old_nonempty_handle(self):
+    class Verifier:
+      handle = "old"
+      refreshed = False
+
+      async def verify_envelope(self, _envelope):
+        return {"handle": self.handle}
+
+      async def fetch_actor(self, _host, *, force=False):
+        self.refreshed = force
+        self.handle = "new"
+
+    with tempfile.TemporaryDirectory() as data_dir:
+      store = common_public.CommonPublicStore(data_dir)
+      store.register("member.example", "old", "")
+      verifier = Verifier()
+      actor = asyncio.run(common_public.verify_named_member(
+        store, verifier, {"from": "member.example"},
+        expected_handle="new",
+      ))
+      self.assertTrue(verifier.refreshed)
+      self.assertEqual(actor["handle"], "new")
+      self.assertEqual(store.search_directory("member.example")["users"][0]["handle"], "new")
 
   def test_members_without_a_username_cannot_join_or_post(self):
     with tempfile.TemporaryDirectory() as data_dir:
