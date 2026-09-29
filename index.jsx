@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Chat, Globe, Plus, Users } from '@openai/apps-sdk-ui/components/Icon'
+import { Chat, Globe, Users } from '@openai/apps-sdk-ui/components/Icon'
 import { CSS } from './theme.js'
 import * as api from './api.js'
 import Board, { Avatar } from './ui/Board.jsx'
@@ -102,11 +102,11 @@ function MainNavigation({ className = '', tab, unread, boardActivity, onSelect }
     <nav className={`cn-nav ${className}`.trim()} aria-label="Main navigation">
       <button className={`cn-nav-item${tab === 'board' ? ' is-active' : ''}`} aria-current={tab === 'board' ? 'page' : undefined} onClick={() => onSelect('board')}>
         {boardActivity && <span className="cn-nav-dot" aria-label="New board activity" />}
-        <Globe aria-hidden="true" /><span>Board</span>
+        <Globe aria-hidden="true" /><span>Community</span>
       </button>
       <button className={`cn-nav-item${tab === 'messages' ? ' is-active' : ''}`} aria-current={tab === 'messages' ? 'page' : undefined} onClick={() => onSelect('messages')}>
         {unread > 0 && <span className="cn-badge">{unread}</span>}
-        <Chat aria-hidden="true" /><span>Messages</span>
+        <Chat aria-hidden="true" /><span>Chats</span>
       </button>
       <button className={`cn-nav-item${tab === 'people' ? ' is-active' : ''}`} aria-current={tab === 'people' ? 'page' : undefined} onClick={() => onSelect('people')}>
         <Users aria-hidden="true" /><span>People</span>
@@ -141,7 +141,6 @@ export default function App({ appId, token }) {
   const [lightbox, setLightbox] = useState(null)
   const [profileRequest, setProfileRequest] = useState(null)
   const [composing, setComposing] = useState(false)
-  const [threadExpanded, setThreadExpanded] = useState(false)
   const [creatingGroup, setCreatingGroup] = useState(false)
   const [participationIntent, setParticipationIntent] = useState(null)
   const [intentState, setIntentState] = useState('loading')
@@ -639,7 +638,7 @@ export default function App({ appId, token }) {
       <MainNavigation className="cn-nav-mobile" tab={tab} unread={unread}
                       boardActivity={boardActivity} onSelect={setTab} />
 
-      <div className="cn-scroll">
+      <div className={`cn-scroll${tab === 'board' ? ' is-board' : ''}`}>
         <div className="cn-content">
           <ParticipationNotice
             me={me}
@@ -665,7 +664,6 @@ export default function App({ appId, token }) {
                  intentState={intentState}
                  participationBusy={saving}
                  emojiReactions={Boolean(feedCapabilities.emoji_reactions)}
-                 onThreadOpenChange={setThreadExpanded}
                  onRetryIntent={loadSavedParticipationIntent}
                  onRequestParticipation={requestParticipation}
                  onCompleteParticipation={completeParticipationIntent}
@@ -707,13 +705,6 @@ export default function App({ appId, token }) {
                   onProfileRequestHandled={() => setProfileRequest(null)} />
         )}
       </div>
-
-      {tab === 'board' && !composing && !threadExpanded && (
-        <button className="cn-compose-fab" type="button" onClick={() => setComposing(true)}
-                aria-label={canParticipate ? 'Create post' : 'Write a post to share after joining'}>
-          <Plus aria-hidden="true" />
-        </button>
-      )}
 
       {toast && <div className={`cn-toast${toast.kind ? ` is-${toast.kind}` : ''}`} role="status">{toast.text}</div>}
       <Lightbox image={lightbox} onClose={() => setLightbox(null)} />

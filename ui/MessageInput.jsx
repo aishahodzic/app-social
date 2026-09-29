@@ -1,4 +1,5 @@
 import { useLayoutEffect } from 'react'
+import { shouldSubmitMessageKey } from './interactionRules.js'
 
 // Matches the service limit for direct and group messages.
 const MAX_MESSAGE_CHARS = 40000
@@ -10,9 +11,8 @@ export function keepMessageFocus(event) {
   event.preventDefault()
 }
 
-// A multi-line message box that grows with its text. On a physical keyboard
-// Enter sends and Shift+Enter adds a line; touch keyboards keep Enter as a
-// newline and send with the button.
+// A multi-line message box that grows with its text. Enter sends, Shift+Enter
+// adds a line, and IME composition is never interrupted.
 export default function MessageInput({ inputRef, value, onChange, disabled }) {
   useLayoutEffect(() => {
     const el = inputRef.current
@@ -21,8 +21,7 @@ export default function MessageInput({ inputRef, value, onChange, disabled }) {
   }, [value, inputRef])
 
   function onKeyDown(event) {
-    if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
-    if (window.matchMedia('(pointer: coarse)').matches) return
+    if (!shouldSubmitMessageKey(event)) return
     event.preventDefault()
     event.currentTarget.form.requestSubmit()
   }

@@ -57,6 +57,7 @@
     "ui/Media.jsx",
     "ui/MessageBubble.jsx",
     "ui/MessageInput.jsx",
+    "ui/interactionRules.js",
     "ui/modalFocus.js",
     "ui/GroupDetails.jsx"
   ],

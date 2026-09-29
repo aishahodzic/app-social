@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
-import { ImageSquare, X } from '@openai/apps-sdk-ui/components/Icon'
+import { ImageSquare, Minus, Plus, X } from '@openai/apps-sdk-ui/components/Icon'
 import { getBoardMedia } from '../api.js'
 import { boardThumbnail } from '../boardMediaCache.js'
+import {
+  clampLightboxScale, pinchLightboxScale, wheelLightboxScale,
+} from './interactionRules.js'
 
 const MAX_BYTES = 1024 * 1024
 const MAX_SIDE = 1600
@@ -318,19 +321,96 @@ export function SelectedImagesStrip({ selected, onRemove }) {
 }
 
 export function Lightbox({ image, onClose }) {
+  const rootRef = useRef(null)
   const closeRef = useRef(null)
   const closeAction = useRef(onClose)
   const returnFocus = useRef(null)
+  const pointers = useRef(new Map())
+  const pinch = useRef(null)
+  const scaleRef = useRef(1)
+  const [scale, setScale] = useState(1)
+  const [offset, setOffset] = useState({ x: 0, y: 0 })
   closeAction.current = onClose
+
+  function applyZoom(next) {
+    const current = scaleRef.current
+    const value = clampLightboxScale(typeof next === 'function' ? next(current) : next)
+    scaleRef.current = value
+    setScale(value)
+    if (value === 1) setOffset({ x: 0, y: 0 })
+  }
+
+  function zoomWithWheel(event) {
+    event.preventDefault()
+    applyZoom(wheelLightboxScale(scaleRef.current, event.deltaY))
+  }
+
+  function pointerDistance() {
+    const points = [...pointers.current.values()]
+    if (points.length < 2) return 0
+    return Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y)
+  }
+
+  function startImageMove(event) {
+    event.stopPropagation()
+    event.currentTarget.setPointerCapture?.(event.pointerId)
+    pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY })
+    if (pointers.current.size === 2) {
+      pinch.current = { distance: pointerDistance(), scale: scaleRef.current }
+    }
+  }
+
+  function moveImage(event) {
+    const previous = pointers.current.get(event.pointerId)
+    if (!previous) return
+    event.preventDefault()
+    pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY })
+    if (pointers.current.size >= 2 && pinch.current?.distance) {
+      applyZoom(pinchLightboxScale(pinch.current.scale, pinch.current.distance, pointerDistance()))
+      return
+    }
+    if (scaleRef.current > 1) {
+      setOffset((current) => ({
+        x: current.x + event.clientX - previous.x,
+        y: current.y + event.clientY - previous.y,
+      }))
+    }
+  }
+
+  function endImageMove(event) {
+    pointers.current.delete(event.pointerId)
+    if (pointers.current.size < 2) pinch.current = null
+  }
 
   useEffect(() => {
     if (!image) return undefined
+    setScale(1)
+    scaleRef.current = 1
+    setOffset({ x: 0, y: 0 })
+    pointers.current.clear()
+    pinch.current = null
     returnFocus.current = document.activeElement
     const onKeyDown = (event) => {
       if (event.key === 'Escape') closeAction.current()
+      if (event.key === '+' || event.key === '=') {
+        event.preventDefault()
+        applyZoom(scaleRef.current + 0.25)
+      }
+      if (event.key === '-') {
+        event.preventDefault()
+        applyZoom(scaleRef.current - 0.25)
+      }
+      if (event.key === '0') {
+        event.preventDefault()
+        applyZoom(1)
+      }
       if (event.key === 'Tab') {
         event.preventDefault()
-        closeRef.current?.focus()
+        const controls = [...(rootRef.current?.querySelectorAll('button:not(:disabled)') || [])]
+        if (!controls.length) return
+        const current = controls.indexOf(document.activeElement)
+        const direction = event.shiftKey ? -1 : 1
+        controls[(current + direction + controls.length) % controls.length]?.focus()
       }
     }
     document.addEventListener('keydown', onKeyDown)
@@ -344,13 +424,30 @@ export function Lightbox({ image, onClose }) {
 
   if (!image) return null
   return (
-    <div className="cn-lightbox" role="dialog" aria-modal="true" aria-label="Image preview"
+    <div ref={rootRef} className="cn-lightbox" role="dialog" aria-modal="true" aria-label="Image preview"
          onClick={onClose}>
       <button ref={closeRef} className="cn-lightbox-close" type="button"
               onClick={(event) => { event.stopPropagation(); onClose() }} aria-label="Close image preview">
         <X aria-hidden="true" />
       </button>
-      <img src={image.url} alt={image.alt || 'Expanded image'} onClick={(event) => event.stopPropagation()} />
+      <div className={`cn-lightbox-stage${scale > 1 ? ' is-zoomed' : ''}`}
+           onClick={(event) => event.stopPropagation()} onWheel={zoomWithWheel}
+           onPointerDown={startImageMove} onPointerMove={moveImage}
+           onPointerUp={endImageMove} onPointerCancel={endImageMove}
+           onDoubleClick={() => applyZoom(scale > 1 ? 1 : 2)}>
+        <img src={image.url} alt={image.alt || 'Expanded image'} draggable="false"
+             style={{ transform: `translate3d(${offset.x}px, ${offset.y}px, 0) scale(${scale})` }} />
+      </div>
+      <div className="cn-lightbox-controls" aria-label="Image zoom controls">
+        <button type="button" onClick={(event) => { event.stopPropagation(); applyZoom(scale - 0.25) }}
+                disabled={scale <= 1} aria-label="Zoom out"><Minus aria-hidden="true" /></button>
+        <button type="button" className="cn-lightbox-reset"
+                onClick={(event) => { event.stopPropagation(); applyZoom(1) }} aria-label="Reset zoom">
+          {Math.round(scale * 100)}%
+        </button>
+        <button type="button" onClick={(event) => { event.stopPropagation(); applyZoom(scale + 0.25) }}
+                disabled={scale >= 4} aria-label="Zoom in"><Plus aria-hidden="true" /></button>
+      </div>
     </div>
   )
 }
