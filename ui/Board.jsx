@@ -949,7 +949,7 @@ export default function Board({
           return (
             <article className={`cn-post${threadOpen ? ' has-thread' : ''}${me?.host && post.host === me.host ? ' is-mine' : ''}`} key={post.id}
                      onClick={(event) => {
-                       if (!event.target.closest('button, input, textarea, a')) openReplies(post)
+                       if (!event.target.closest('button, input, textarea, a, .cn-avatar')) openReplies(post)
                      }}>
               <Avatar name={post.handle} host={post.host} remote lazy onOpen={togglePreview} />
               <div className="cn-post-main">
@@ -959,7 +959,7 @@ export default function Board({
                     <span className="cn-post-dot" aria-hidden="true">·</span>
                     <span className="cn-meta">{postDateTime(post.created_at)}</span>
                   </button>
-                  {me?.host && post.host === me.host && (
+                  {canInteract && me?.host && post.host === me.host && (
                     <button
                       className="cn-post-delete"
                       onClick={() => { restoreDeleteFocus.current = true; setDeleteTarget(post) }}

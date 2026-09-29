@@ -90,6 +90,8 @@ test('Community replaces the unjoined composer with Join and preserves earlier-m
   assert.match(board, /Join Social to message/)
   assert.match(board, /onOpen=\{togglePreview\}/)
   assert.match(board, /onClick=\{togglePreview\} disabled=\{!canInteract\}/)
+  assert.match(board, /canInteract && me\?\.host && post\.host === me\.host/)
+  assert.match(board, /\.cn-avatar'\)\) openReplies\(post\)/)
   assert.doesNotMatch(board, /Continue to send message/)
   assert.match(board, /const previousHeight = scroller\?\.scrollHeight/)
   assert.match(board, /prependedScrollTop\(previousTop, previousHeight, scroller\.scrollHeight\)/)

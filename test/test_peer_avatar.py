@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -21,6 +21,11 @@ with patch.dict(os.environ, {
   "APP_STORAGE_DIR": tempfile.gettempdir(), "APP_ID": "7", "APP_SLUG": "social",
 }):
   import social_routes
+
+
+@asynccontextmanager
+async def unlocked_identity():
+  yield
 
 
 def png(width=32, height=24) -> bytes:
@@ -138,6 +143,8 @@ class PeerAvatarHardeningTests(unittest.IsolatedAsyncioTestCase):
       "name": "Owner", "handle": "owner", "avatar_source_url": "old-url",
     }
     with patch.object(
+      social_routes, "_identity_lock", new=unlocked_identity,
+    ), patch.object(
       social_routes, "_load_identity", return_value=identity,
     ), patch.object(
       social_routes, "owner_profile",
@@ -319,7 +326,9 @@ class PeerAvatarHardeningTests(unittest.IsolatedAsyncioTestCase):
         "avatar_url": "https://you.example/old.png", **changes,
       }
       register = AsyncMock(return_value="registered")
-      with patch.object(social_routes, "_load_identity", return_value=identity), patch.object(
+      with patch.object(social_routes, "_identity_lock", new=unlocked_identity), patch.object(
+        social_routes, "_load_identity", return_value=identity,
+      ), patch.object(
         social_routes, "owner_profile", AsyncMock(return_value=profile),
       ), patch.object(
         social_routes, "_download_avatar", AsyncMock(return_value=png()),

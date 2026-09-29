@@ -62,12 +62,12 @@ import re
 import time
 import uuid
 from pathlib import Path
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from common_protocol import (
@@ -972,7 +972,16 @@ async def get_actor(db=Depends(get_db)):
   identity = _load_identity()
   if not _profile_public(identity):
     return _key_actor_doc(identity)
-  return _actor_doc(identity, await public_actor_metadata())
+  metadata = await public_actor_metadata()
+  identity = _load_identity()
+  if not _profile_public(identity):
+    return _key_actor_doc(identity)
+  actor = _actor_doc(identity, metadata)
+  if not _membership_confirmed(identity):
+    # The host needs this card only for the registration handshake; a failed
+    # join must not leave a shared cached copy of the temporary profile.
+    return JSONResponse(actor, headers={"Cache-Control": "no-store"})
+  return actor
 
 
 def _temporarily_unavailable_avatar(
@@ -1193,7 +1202,8 @@ async def _refresh_profile_cache(db, principal: Principal) -> dict:
   actor card and directory registration working when the account service is
   briefly unreachable; the live profile remains the source of truth.
   """
-  identity = _load_identity()
+  async with _identity_lock():
+    cached_avatar_url = _load_identity().get("avatar_source_url")
   profile = None
   account_error = None
   avatar_updated = False
@@ -1201,36 +1211,37 @@ async def _refresh_profile_cache(db, principal: Principal) -> dict:
     profile = await owner_profile()
   except HTTPException as exc:
     account_error = str(exc.detail)
-  if profile:
-    name = str(profile.get("display_name") or profile.get("handle") or "")
-    handle = str(profile.get("handle") or "")
-    if name[:MAX_NAME_CHARS] != identity.get("name") or (
-      handle[:MAX_NAME_CHARS] != identity.get("handle")
-    ):
-      identity["name"] = name[:MAX_NAME_CHARS]
-      identity["handle"] = handle[:MAX_NAME_CHARS]
-      _save_identity(identity)
-    avatar_url = profile.get("avatar_url")
-    if (
-      isinstance(avatar_url, str)
-      and avatar_url
-      and avatar_url != identity.get("avatar_source_url")
-    ):
-      try:
-        avatar = await _download_avatar(avatar_url)
+  avatar = None
+  avatar_url = profile.get("avatar_url") if profile else None
+  if isinstance(avatar_url, str) and avatar_url and avatar_url != cached_avatar_url:
+    try:
+      avatar = await _download_avatar(avatar_url)
+    except Exception:
+      pass
+  async with _identity_lock():
+    # Profile calls may return while registration is in flight. Apply only
+    # these profile fields to the latest saved identity, never a stale snapshot.
+    identity = _load_identity()
+    changed = False
+    if profile:
+      name = str(profile.get("display_name") or profile.get("handle") or "")[:MAX_NAME_CHARS]
+      handle = str(profile.get("handle") or "")[:MAX_NAME_CHARS]
+      if name != identity.get("name") or handle != identity.get("handle"):
+        identity["name"] = name
+        identity["handle"] = handle
+        changed = True
+      if avatar is not None and avatar_url != identity.get("avatar_source_url"):
         atomic_write(_avatar_path(), avatar)
         identity["avatar_source_url"] = avatar_url
+        avatar_updated = changed = True
+      elif "avatar_url" in profile and not avatar_url:
+        avatar_path = _avatar_path()
+        if avatar_path.is_file() or identity.get("avatar_source_url"):
+          avatar_path.unlink(missing_ok=True)
+          identity.pop("avatar_source_url", None)
+          avatar_updated = changed = True
+      if changed:
         _save_identity(identity)
-        avatar_updated = True
-      except Exception:
-        pass
-    elif "avatar_url" in profile and not avatar_url:
-      avatar_path = _avatar_path()
-      if avatar_path.is_file() or identity.get("avatar_source_url"):
-        avatar_path.unlink(missing_ok=True)
-        identity.pop("avatar_source_url", None)
-        _save_identity(identity)
-        avatar_updated = True
   if identity.get("joined_at") and identity.get("directory_synced") != _directory_listing(identity):
     # The directory lists this handle and copies this avatar; re-registering
     # tells the community host to refresh both, and repeats until it succeeds.
@@ -1309,18 +1320,19 @@ async def join_community(
   require_nondelegated_owner_control(principal)
   _require_owner_or_common_app(db, principal)
   state = await _refresh_profile_cache(db, principal)
-  identity = state["identity"]
-  if not state["profile"] and not identity.get("name"):
-    raise HTTPException(
-      status_code=409,
-      detail=(
-        "No Möbius profile is connected yet. Connect your account in "
-        "Möbius · You first."
-      ),
-    )
-  _require_username(identity)
-  identity["joined_at"] = identity.get("joined_at") or time.time()
-  _save_identity(identity)
+  async with _identity_lock():
+    identity = _load_identity()
+    if not state["profile"] and not identity.get("name"):
+      raise HTTPException(
+        status_code=409,
+        detail=(
+          "No Möbius profile is connected yet. Connect your account in "
+          "Möbius · You first."
+        ),
+      )
+    _require_username(identity)
+    identity["joined_at"] = identity.get("joined_at") or time.time()
+    _save_identity(identity)
   status = await _register_with_community_host(identity)
   return {
     "status": "joined" if status == "registered" else "pending",
@@ -1338,35 +1350,66 @@ def _directory_listing(identity: dict) -> dict:
   }
 
 
+@asynccontextmanager
+async def _identity_lock():
+  # Each service request may run in another process. Nonblocking flock also
+  # lets a second request on this event loop wait without freezing the first.
+  # Keep this inode: unlinking it could split the lock across processes.
+  path = _identity_path().with_name(".identity.lock")
+  path.parent.mkdir(parents=True, exist_ok=True)
+  with path.open("a+b") as handle:
+    while True:
+      try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+      except BlockingIOError:
+        await asyncio.sleep(0.02)
+    try:
+      yield
+    finally:
+      fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 async def _register_with_community_host(identity: dict) -> str:
   """Announce this instance to its community host. Returns a status string."""
-  host = COMMUNITY_HOST
-  envelope = {
-    "v": 0,
-    "type": "register",
-    "from": _own_host(),
-    "handle": identity.get("handle") or "",
-    "bio": identity.get("bio") or "",
-    "sent_at": time.time(),
-  }
-  envelope["sig"] = _sign(envelope, identity["private_key_b64"])
-  identity["registration_public_until"] = time.time() + 60
-  _save_identity(identity)
-  try:
-    response = await _post_signed_envelope(
-      _peer_service_url(host, "directory"), envelope,
-      max_response_bytes=MAX_ENVELOPE_BYTES,
-    )
-    response.raise_for_status()
-    identity["directory_synced"] = _directory_listing(identity)
-    return "registered"
-  except httpx.HTTPStatusError as exc:
-    return "verification_failed" if exc.response.status_code == 403 else "rejected"
-  except Exception:
-    return "unreachable"
-  finally:
-    identity.pop("registration_public_until", None)
+  async with _identity_lock():
+    # A waiting request may hold a snapshot from before another Join finished.
+    saved = dict(_load_identity())
+    identity.clear()
+    identity.update(saved)
+    listing = _directory_listing(identity)
+    envelope = {
+      "v": 0,
+      "type": "register",
+      "from": _own_host(),
+      "handle": identity.get("handle") or "",
+      "bio": identity.get("bio") or "",
+      "sent_at": time.time(),
+    }
+    envelope["sig"] = _sign(envelope, identity["private_key_b64"])
+    identity["registration_public_until"] = time.time() + 60
     _save_identity(identity)
+    status = "unreachable"
+    try:
+      response = await _post_signed_envelope(
+        _peer_service_url(COMMUNITY_HOST, "directory"), envelope,
+        max_response_bytes=MAX_ENVELOPE_BYTES,
+      )
+      response.raise_for_status()
+      status = "registered"
+    except httpx.HTTPStatusError as exc:
+      status = "verification_failed" if exc.response.status_code == 403 else "rejected"
+    except Exception:
+      pass
+    finally:
+      latest = dict(_load_identity())
+      if status == "registered":
+        latest["directory_synced"] = listing
+      latest.pop("registration_public_until", None)
+      _save_identity(latest)
+      identity.clear()
+      identity.update(latest)
+    return status
 
 
 def _require_username(identity: dict) -> None:
@@ -1399,10 +1442,11 @@ async def update_me(
 ):
   require_nondelegated_owner_control(principal)
   _require_owner_or_common_app(db, principal)
-  identity = _load_identity()
-  if update.bio is not None:
-    identity["bio"] = update.bio.strip()[:MAX_BIO_CHARS]
-  _save_identity(identity)
+  async with _identity_lock():
+    identity = _load_identity()
+    if update.bio is not None:
+      identity["bio"] = update.bio.strip()[:MAX_BIO_CHARS]
+      _save_identity(identity)
   status = (
     await _register_with_community_host(identity)
     if identity.get("joined_at") else "not_joined"
