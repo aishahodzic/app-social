@@ -434,7 +434,8 @@ with tempfile.TemporaryDirectory() as directory:
 '''
     env = {**os.environ, "INSTANCE_DOMAIN": "self.example", "APP_ID": "7",
            "APP_SLUG": "social", "APP_STORAGE_DIR": "/tmp/social-identity-race",
-           "INSTANCE_ORIGIN": "https://self.example"}
+           "INSTANCE_ORIGIN": "https://self.example",
+           "API_BASE_URL": "http://127.0.0.1:9"}
     result = subprocess.run(
       [sys.executable, "-c", script], cwd=ROOT, env=env,
       capture_output=True, text=True, timeout=6,
