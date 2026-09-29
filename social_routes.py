@@ -1950,6 +1950,21 @@ async def _search_community_members(q: str) -> dict:
     response.raise_for_status()
     return {"host": host, **response.json()}
   except httpx.HTTPStatusError as exc:
+    if exc.response.status_code == 404:
+      # The shared host is rolled out separately from personal installations.
+      # This old public read is reachable only after the local membership gate;
+      # once the host supports signed reads, it is never used.
+      try:
+        legacy = await federation_request(
+          "GET", _peer_service_url(host, "directory"), params={"q": q},
+          timeout_seconds=OUTBOUND_TIMEOUT_S,
+        )
+        legacy.raise_for_status()
+        return {"host": host, **legacy.json()}
+      except Exception as legacy_exc:
+        raise HTTPException(
+          status_code=502, detail="Community host could not be reached."
+        ) from legacy_exc
     if exc.response.status_code == 403:
       raise HTTPException(
         status_code=403, detail="Join Social again to access People.",

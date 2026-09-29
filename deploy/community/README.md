@@ -4,11 +4,12 @@ This is the reproducible image for Social's shared public Community board and
 members-only People directory at `www.mobius.you`. Private messages and owner
 identity keys remain on each person's own Möbius instance.
 
-Deploy the signed directory-search support before updating personal Social
-installations, then close the old public GET directory after they have updated.
-The final image in this revision closes GET immediately: deploying it before
-updating older installations makes their People search fail. Merging this PR
-does not itself perform either deployment or an installation update.
+Personal Social installations may update before the shared host: joined users
+use the old public GET directory only while the host returns 404 for signed
+search. The local People route still refuses unjoined users. Deploying this
+image switches those updated installations to signed search and closes public
+GET, so older installations must update or their People search stops working.
+Merging this PR does not itself deploy the image or update an installation.
 
 Build only from a committed revision and pass that exact revision into the
 image:

@@ -822,6 +822,59 @@ mirror_message('dm', 'peer.example', json.loads(path.read_text()), path)
     self.assertEqual(result["me"]["handle"], "owner")
     self.assertEqual(result["me"]["registration"], "missing")
 
+  def test_joined_people_search_uses_old_host_only_when_signed_route_is_absent(self):
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    environment = {
+      "APP_ID": "7", "APP_SLUG": "social",
+      "APP_STORAGE_DIR": "/tmp/social-directory-rollout-test",
+      "INSTANCE_DOMAIN": "self.example", "INSTANCE_ORIGIN": "https://self.example",
+    }
+    with patch.dict(os.environ, environment):
+      import social_routes
+
+    calls = []
+
+    async def community(method, url, **kwargs):
+      calls.append((method, url, kwargs))
+      status = 404 if method == "POST" else 200
+      body = {} if status == 404 else {"users": [{"host": "alex.example", "handle": "alex"}]}
+      return httpx.Response(status, json=body, request=httpx.Request(method, url))
+
+    with (
+      patch.dict(os.environ, environment),
+      patch.object(social_routes, "_require_member") as require_member,
+      patch.object(social_routes, "_load_identity", return_value={
+        "private_key_b64": "unused", "joined_at": 1,
+        "directory_synced": {"handle": "owner"},
+      }),
+      patch.object(social_routes, "_sign", return_value="signature"),
+      patch.object(social_routes, "federation_request", new=AsyncMock(side_effect=community)),
+    ):
+      result = asyncio.run(social_routes._people_payload("alex", db=None, principal=None))
+    require_member.assert_called_once_with(None, None)
+    self.assertEqual(result["users"][0]["host"], "alex.example")
+    self.assertEqual([call[0] for call in calls], ["POST", "GET"])
+    self.assertTrue(calls[0][1].endswith("/directory/search"))
+    self.assertTrue(calls[1][1].endswith("/directory"))
+    self.assertEqual(calls[1][2]["params"], {"q": "alex"})
+
+    async def denied(method, url, **kwargs):
+      calls.append((method, url, kwargs))
+      return httpx.Response(403, json={}, request=httpx.Request(method, url))
+
+    calls.clear()
+    with (
+      patch.dict(os.environ, environment),
+      patch.object(social_routes, "_load_identity", return_value={"private_key_b64": "unused"}),
+      patch.object(social_routes, "_sign", return_value="signature"),
+      patch.object(social_routes, "federation_request", new=AsyncMock(side_effect=denied)),
+    ):
+      with self.assertRaises(HTTPException) as raised:
+        asyncio.run(social_routes._search_community_members("alex"))
+    self.assertEqual(raised.exception.status_code, 403)
+    self.assertEqual([call[0] for call in calls], ["POST"])
+
   def test_federation_source_has_no_legacy_platform_route(self):
     for name in (
       "common_protocol.py", "social_routes.py", "social_groups.py",
