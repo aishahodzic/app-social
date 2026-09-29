@@ -943,9 +943,9 @@ export default function Board({
           ))
           const replyCount = countFor(post)
           const threadOpen = replyPost?.id === post.id
-          const togglePreview = () => canInteract
-            ? setPreviewPost(previewPost?.id === post.id ? null : { id: post.id, host: post.host })
-            : onOpenPerson(post.host)
+          const togglePreview = canInteract
+            ? () => setPreviewPost(previewPost?.id === post.id ? null : { id: post.id, host: post.host })
+            : null
           return (
             <article className={`cn-post${threadOpen ? ' has-thread' : ''}${me?.host && post.host === me.host ? ' is-mine' : ''}`} key={post.id}
                      onClick={(event) => {
@@ -954,7 +954,7 @@ export default function Board({
               <Avatar name={post.handle} host={post.host} remote lazy onOpen={togglePreview} />
               <div className="cn-post-main">
                 <div className="cn-post-head">
-                  <button className="cn-person" onClick={togglePreview}>
+                  <button className="cn-person" onClick={togglePreview} disabled={!canInteract}>
                     <span className="cn-person-name">{post.handle ? `@${post.handle}` : 'Social member'}</span>
                     <span className="cn-post-dot" aria-hidden="true">·</span>
                     <span className="cn-meta">{postDateTime(post.created_at)}</span>

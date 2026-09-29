@@ -74,7 +74,9 @@ class PeerAvatarHardeningTests(unittest.IsolatedAsyncioTestCase):
     ), patch.object(
       social_routes, "_avatar_path", return_value=avatar,
     ), patch.object(
-      social_routes, "_load_identity", return_value={"joined_at": 1},
+      social_routes, "_load_identity", return_value={
+        "joined_at": 1, "directory_synced": {"handle": "owner"},
+      },
     ):
       response = social_routes.get_avatar()
 

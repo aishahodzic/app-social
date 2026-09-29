@@ -33,6 +33,8 @@ so a failed join remains discoverable after reopening. **Try joining again** rep
 a missing listing; an unavailable directory is shown separately from a missing
 registration. Handle search accepts both `name` and `@name`. Other installations must receive this app update;
 changing one instance does not update a friend's copy.
+The host can read a named actor card and photo while verifying Join; if that
+registration fails, the actor returns to keys only and the photo is hidden.
 
 Social owns its server side as a reviewed app service (protocol `common/0`):
 Ed25519-signed envelopes, a public actor card per instance, an inbox each

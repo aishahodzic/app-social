@@ -165,6 +165,7 @@ export const CSS = `
   display: flex; align-items: baseline; gap: 4px;
 }
 .cn-person-name { font-size: 14px; font-weight: 700; line-height: 1.25; letter-spacing: -0.018em; }
+.cn-person:disabled { cursor: default; }
 .cn-meta { font-size: 13px; color: var(--muted); }
 .cn-post-dot { color: var(--muted); font-size: 13px; }
 .cn-post-copy {

@@ -414,7 +414,10 @@ export function Lightbox({ image, onClose }) {
         <X aria-hidden="true" />
       </button>
       <div className={`cn-lightbox-stage${scale > 1 ? ' is-zoomed' : ''}`}
-           onClick={(event) => event.stopPropagation()} onWheel={zoomWithWheel}
+           onClick={(event) => {
+             event.stopPropagation()
+             if (event.target === event.currentTarget) onClose()
+           }} onWheel={zoomWithWheel}
            onPointerDown={startImageMove} onPointerMove={moveImage}
            onPointerUp={endImageMove} onPointerCancel={endImageMove}
            onDoubleClick={() => applyZoom(scale > 1 ? 1 : 2)}>

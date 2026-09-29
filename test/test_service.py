@@ -66,6 +66,24 @@ class SocialServiceTests(unittest.TestCase):
           self.assertEqual(response["status"], 403)
           self.assertIn("Join Social", response["body"]["detail"])
 
+  def test_failed_join_keeps_public_actor_key_only_and_avatar_hidden(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      common = root / "apps/7/server/common"
+      common.mkdir(parents=True)
+      (common / "identity.json").write_text(json.dumps({
+        "private_key_b64": base64.b64encode(b"p" * 32).decode(),
+        "enc_private_key_b64": base64.b64encode(b"e" * 32).decode(),
+        "handle": "owner", "bio": "Not published", "joined_at": 1,
+      }))
+      (common / "avatar.png").write_bytes(b"an existing photo")
+      actor = self.call(root, "actor")
+      self.assertEqual(actor["status"], 200)
+      self.assertIn("public_key", actor["body"])
+      self.assertNotIn("handle", actor["body"])
+      self.assertNotIn("bio", actor["body"])
+      self.assertEqual(self.call(root, "avatar")["status"], 404)
+
   def test_join_is_not_reported_complete_until_directory_accepts_it(self):
     import asyncio
     from unittest.mock import AsyncMock, patch
@@ -106,6 +124,65 @@ class SocialServiceTests(unittest.TestCase):
       joined = asyncio.run(social_routes.join_community(db=None, principal=principal))
     self.assertEqual(joined["status"], "joined")
     self.assertTrue(social_routes._membership_confirmed(identity))
+
+  def test_registration_exposes_profile_only_during_the_host_handshake(self):
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    with patch.dict(os.environ, {
+      "APP_STORAGE_DIR": "/tmp/social-registration-window-test",
+      "APP_ID": "7", "APP_SLUG": "social", "INSTANCE_DOMAIN": "self.example",
+    }):
+      import social_routes
+
+    identity = {"joined_at": 1, "handle": "owner", "private_key_b64": "unused"}
+    seen = []
+
+    async def unreachable(*_args, **_kwargs):
+      seen.append(social_routes._profile_public(identity))
+      raise httpx.ConnectError("offline")
+
+    with (
+      patch.object(social_routes, "_save_identity"),
+      patch.object(social_routes, "_own_host", return_value="self.example"),
+      patch.object(social_routes, "_sign", return_value="signature"),
+      patch.object(social_routes, "_post_signed_envelope", new=unreachable),
+    ):
+      status = asyncio.run(social_routes._register_with_community_host(identity))
+    self.assertEqual(status, "unreachable")
+    self.assertEqual(seen, [True])
+    self.assertFalse(social_routes._profile_public(identity))
+    self.assertNotIn("registration_public_until", identity)
+
+    with tempfile.TemporaryDirectory() as directory:
+      avatar = Path(directory) / "avatar.png"
+      avatar.write_bytes(b"photo")
+      identity["registration_public_until"] = time.time() + 30
+      with (
+        patch.object(social_routes, "_identity_path", return_value=avatar),
+        patch.object(social_routes, "_avatar_path", return_value=avatar),
+        patch.object(social_routes, "_load_identity", return_value=identity),
+      ):
+        self.assertEqual(social_routes.get_avatar().headers["cache-control"], "no-store")
+      identity["registration_public_until"] = time.time() - 1
+      self.assertFalse(social_routes._profile_public(identity))
+      identity["registration_public_until"] = time.time() + 30
+      identity.pop("joined_at")
+      self.assertFalse(social_routes._profile_public(identity))
+      identity["joined_at"] = 1
+      identity.pop("registration_public_until")
+
+    with (
+      patch.object(social_routes, "_save_identity"),
+      patch.object(social_routes, "_own_host", return_value="self.example"),
+      patch.object(social_routes, "_sign", return_value="signature"),
+      patch.object(social_routes, "_post_signed_envelope", new=AsyncMock(
+        return_value=httpx.Response(200, json={}, request=httpx.Request("POST", "https://self.example")),
+      )),
+    ):
+      status = asyncio.run(social_routes._register_with_community_host(identity))
+    self.assertEqual(status, "registered")
+    self.assertTrue(social_routes._profile_public(identity))
+    self.assertNotIn("registration_public_until", identity)
 
   def test_wire_json_size_matches_the_http_transport(self):
     envelope = {
@@ -770,6 +847,7 @@ mirror_message('dm', 'peer.example', json.loads(path.read_text()), path)
           "enc_private_key_b64": base64.b64encode(b"e" * 32).decode(),
           "enc_public_key_b64": base64.b64encode(b"x" * 32).decode(),
           "handle": "owner", "bio": "Hello", "joined_at": 1,
+          "directory_synced": {"handle": "owner"},
         }))
         actor = self.call(
           root, "actor", api_base_url=f"http://127.0.0.1:{server.server_port}",

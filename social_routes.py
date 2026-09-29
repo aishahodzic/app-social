@@ -963,14 +963,14 @@ async def _mark_dm_read(app, peer_host: str) -> bool:
 
 @router.get("/actor")
 async def get_actor(db=Depends(get_db)):
-  """Publish keys for private federation, and profile data only after join."""
+  """Publish keys for federation, and profile data only for confirmed members."""
   # An unauthenticated probe must not lazily create an identity on an
   # untouched installation. Authenticated owner use and established
   # federation operations create this file before peers need its keys.
   if not _identity_path().is_file():
     raise HTTPException(status_code=404, detail="Social profile not found.")
   identity = _load_identity()
-  if not identity.get("joined_at"):
+  if not _profile_public(identity):
     return _key_actor_doc(identity)
   return _actor_doc(identity, await public_actor_metadata())
 
@@ -988,10 +988,11 @@ def _temporarily_unavailable_avatar(
 
 @router.get("/avatar")
 def get_avatar():
-  """This instance's public profile avatar. Public by design."""
+  """This instance's avatar, public only during registration or membership."""
   if not _identity_path().is_file():
     raise HTTPException(status_code=404, detail="Social profile not found.")
-  if not _load_identity().get("joined_at"):
+  identity = _load_identity()
+  if not _profile_public(identity):
     raise HTTPException(status_code=404, detail="Social profile not found.")
   path = _avatar_path()
   if not path.is_file():
@@ -1002,6 +1003,7 @@ def get_avatar():
     headers={
       "Cache-Control": (
         "public, max-age=300, s-maxage=3600, stale-while-revalidate=86400"
+        if _membership_confirmed(identity) else "no-store"
       ),
       "X-Content-Type-Options": "nosniff",
     },
@@ -1124,6 +1126,16 @@ def _require_owner_or_common_app(db, principal: Principal):
 
 def _membership_confirmed(identity: dict) -> bool:
   return bool(identity.get("joined_at") and identity.get("directory_synced"))
+
+
+def _profile_public(identity: dict) -> bool:
+  # The host must read the named actor while verifying registration. A bounded
+  # window permits that handshake without publishing a failed join indefinitely.
+  window = identity.get("registration_public_until")
+  return bool(identity.get("joined_at")) and (
+    _membership_confirmed(identity) or
+    isinstance(window, (int, float)) and window > time.time()
+  )
 
 
 def _joined_for_federation() -> bool:
@@ -1338,19 +1350,23 @@ async def _register_with_community_host(identity: dict) -> str:
     "sent_at": time.time(),
   }
   envelope["sig"] = _sign(envelope, identity["private_key_b64"])
+  identity["registration_public_until"] = time.time() + 60
+  _save_identity(identity)
   try:
     response = await _post_signed_envelope(
       _peer_service_url(host, "directory"), envelope,
       max_response_bytes=MAX_ENVELOPE_BYTES,
     )
     response.raise_for_status()
+    identity["directory_synced"] = _directory_listing(identity)
+    return "registered"
   except httpx.HTTPStatusError as exc:
     return "verification_failed" if exc.response.status_code == 403 else "rejected"
   except Exception:
     return "unreachable"
-  identity["directory_synced"] = _directory_listing(identity)
-  _save_identity(identity)
-  return "registered"
+  finally:
+    identity.pop("registration_public_until", None)
+    _save_identity(identity)
 
 
 def _require_username(identity: dict) -> None:
